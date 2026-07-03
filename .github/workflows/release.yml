@@ -45,7 +45,7 @@ jobs:
           cargo --version
 
       - name: Install frontend dependencies
-        run: npm install
+        run: npm ci
 
       - name: Frontend build
         run: npm run build

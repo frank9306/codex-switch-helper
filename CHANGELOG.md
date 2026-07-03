@@ -2,7 +2,7 @@
 
 ## 0.1.2 - 2026-07-03
 
-- Changed the release workflow dependency install step from `npm ci` to `npm install` to avoid npm optional dependency lockfile resolution differences on GitHub Actions.
+- Reverted the release workflow dependency install step back to `npm ci` after merging the lockfile fix.
 - Added CI tool version logging for release debugging.
 
 ## 0.1.1 - 2026-07-03
