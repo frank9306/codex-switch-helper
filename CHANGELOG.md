@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1 - 2026-07-03
+
+- Replaced the README product screenshot with a redacted screenshot.
+- Fixed the release workflow to upload Windows installer assets explicitly.
+- Added a manual release workflow dispatch path for republishing assets to an existing tag.
+- Updated English and Chinese README release notes and screenshot sections.
+
 ## 0.1.0 - 2026-07-03
 
 - Initial Windows Tauri desktop app for managing Codex Profiles.
