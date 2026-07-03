@@ -4,6 +4,10 @@ Tauri desktop helper for switching Codex App profiles on Windows.
 
 [简体中文](README.zh-CN.md)
 
+## Screenshot
+
+![Codex Switch Helper screenshot](docs/screenshot.png)
+
 ## What It Does
 
 - Imports an existing Codex Home directory into a tool-owned managed Profile directory.
@@ -32,7 +36,7 @@ Tauri desktop helper for switching Codex App profiles on Windows.
 OpenAI.Codex_2p2nqsd0c76g0!App
 ```
 
-The app auto-detects `OpenAI.Codex_*` first to avoid unrelated apps such as `BFCodexHelp`. You can change the AppID in advanced settings if needed.
+The app auto-detects `OpenAI.Codex_*` first to avoid unrelated apps that happen to contain `Codex` in their name. You can change the AppID in advanced settings if needed.
 
 ## Development
 
@@ -62,4 +66,4 @@ cd ..
 npm run tauri:build
 ```
 
-Also update `CHANGELOG.md` and `README.md` before tagging a release.
+Also update `CHANGELOG.md`, `README.md`, and `README.zh-CN.md` before tagging a release.

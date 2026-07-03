@@ -4,6 +4,10 @@
 
 [English](README.md)
 
+## 产品截图
+
+![Codex Switch Helper 产品截图](docs/screenshot.png)
+
 ## 功能
 
 - 将已有 Codex Home 目录导入到工具托管的 Profile 目录。
@@ -32,7 +36,7 @@
 OpenAI.Codex_2p2nqsd0c76g0!App
 ```
 
-应用会优先自动检测 `OpenAI.Codex_*`，避免误选 `BFCodexHelp` 这类无关应用。必要时可在高级设置里手动修改 AppID。
+应用会优先自动检测 `OpenAI.Codex_*`，避免误选名称里碰巧包含 `Codex` 的无关应用。必要时可在高级设置里手动修改 AppID。
 
 ## 开发
 

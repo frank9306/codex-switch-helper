@@ -35,6 +35,6 @@
 ## Release Checklist
 
 - Before any release or publish, generate/update `CHANGELOG.md`.
-- Before any release or publish, update `README.md` for changed usage, setup, and release notes.
+- Before any release or publish, update `README.md` and `README.zh-CN.md` for changed usage, setup, and release notes.
 - Verify before release: `npm run build`, `cargo fmt --check`, and `cargo check`.
 - If packaging locally, run `npm run tauri:build` after the checks above.
