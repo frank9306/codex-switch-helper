@@ -37,8 +37,15 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Show tool versions
+        run: |
+          node --version
+          npm --version
+          rustc --version
+          cargo --version
+
       - name: Install frontend dependencies
-        run: npm ci
+        run: npm install
 
       - name: Frontend build
         run: npm run build

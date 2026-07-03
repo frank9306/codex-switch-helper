@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2 - 2026-07-03
+
+- Changed the release workflow dependency install step from `npm ci` to `npm install` to avoid npm optional dependency lockfile resolution differences on GitHub Actions.
+- Added CI tool version logging for release debugging.
+
 ## 0.1.1 - 2026-07-03
 
 - Replaced the README product screenshot with a redacted screenshot.
