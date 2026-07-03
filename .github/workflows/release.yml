@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag to publish assets to, for example v0.1.0
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -14,9 +19,14 @@ jobs:
     name: Build and publish Windows release
     runs-on: windows-latest
 
+    env:
+      RELEASE_TAG: ${{ github.event.inputs.release_tag || github.ref_name }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -47,8 +57,8 @@ jobs:
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: Codex Switch Helper ${{ github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Codex Switch Helper ${{ env.RELEASE_TAG }}
           body_path: CHANGELOG.md
           draft: false
           prerelease: false
