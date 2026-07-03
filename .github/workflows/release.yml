@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -40,13 +41,17 @@ jobs:
         working-directory: src-tauri
         run: cargo check
 
-      - name: Build and publish Tauri release
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build Tauri bundles
+        run: npm run tauri:build
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: Codex Switch Helper ${{ github.ref_name }}
-          releaseBody: See CHANGELOG.md for release notes.
-          releaseDraft: false
+          tag_name: ${{ github.ref_name }}
+          name: Codex Switch Helper ${{ github.ref_name }}
+          body_path: CHANGELOG.md
+          draft: false
           prerelease: false
+          files: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*setup.exe
