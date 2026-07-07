@@ -425,6 +425,20 @@ code {
   width: auto;
 }
 
+.checkbox-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 1fr 1fr;
+}
+
+.actions.inline {
+  margin-top: 8px;
+}
+
+.actions.wrap {
+  flex-wrap: wrap;
+}
+
 .settings-panel {
   grid-column: 2;
 }

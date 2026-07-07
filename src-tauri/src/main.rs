@@ -3,7 +3,7 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::{
-    fs, io,
+    env, fs, io,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -14,6 +14,10 @@ use winreg::{enums::HKEY_CURRENT_USER, RegKey};
 const DEFAULT_CODEX_APP_ID: &str = "OpenAI.Codex_2p2nqsd0c76g0!App";
 const CODEX_HOME_ENV_KEY: &str = "CODEX_HOME";
 const OPENAI_API_KEY: &str = "OPENAI_API_KEY";
+const DATA_FILE_OVERRIDE_ENV_KEY: &str = "CODEX_SWITCH_HELPER_DATA_FILE";
+
+const CODEX_PROCESS_NAME: &str = "Codex.exe";
+const CODEX_CONFIG_FILENAME: &str = "config.toml";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,8 +27,12 @@ struct Profile {
     home_path: String,
     import_source_path: Option<String>,
     #[serde(default)]
+    environment_mode: EnvironmentMode,
+    #[serde(default)]
     auth_mode: AuthMode,
     api_key: Option<String>,
+    auth_json: Option<String>,
+    config_toml: Option<String>,
     #[serde(default)]
     managed: bool,
     created_at: String,
@@ -32,12 +40,20 @@ struct Profile {
     last_used_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 enum AuthMode {
     #[default]
     Account,
     ApiKey,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum EnvironmentMode {
+    Shared,
+    #[default]
+    Sandbox,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,17 +128,37 @@ fn create_profile(
     source_path: String,
     auth_mode: AuthMode,
     api_key: Option<String>,
+    environment_mode: EnvironmentMode,
 ) -> Result<Profile, String> {
     let name = normalized_name(&name)?;
-    let source_path = normalized_home_path(&source_path)?;
-    if !source_path.is_dir() {
-        return Err("导入源目录不存在或不是目录。".to_string());
-    }
     validate_auth(&auth_mode, api_key.as_deref())?;
+    let source_path = normalize_optional_home_path(&source_path)?;
+    if matches!(environment_mode, EnvironmentMode::Sandbox)
+        || matches!(auth_mode, AuthMode::Account)
+    {
+        let source_path = source_path
+            .as_deref()
+            .ok_or_else(|| "账号登录或沙盒模式需要选择导入源目录。".to_string())?;
+        if !source_path.is_dir() {
+            return Err("导入源目录不存在或不是目录。".to_string());
+        }
+    }
 
     let mut data = load_data(&app)?;
-    let profile = new_profile(&app, &name, &source_path, auth_mode, api_key)?;
-    copy_dir_recursive(&source_path, Path::new(&profile.home_path)).map_err(format_io_error)?;
+    let profile = new_profile(
+        &app,
+        &name,
+        source_path.as_deref(),
+        auth_mode,
+        api_key,
+        environment_mode,
+    )?;
+    if profile.environment_mode == EnvironmentMode::Sandbox {
+        let source_path = source_path
+            .as_deref()
+            .ok_or_else(|| "沙盒模式需要选择导入源目录。".to_string())?;
+        copy_dir_recursive(source_path, Path::new(&profile.home_path)).map_err(format_io_error)?;
+    }
     data.profiles.push(profile.clone());
     if data.active_profile_id.is_none() {
         data.active_profile_id = Some(profile.id.clone());
@@ -228,7 +264,7 @@ fn inspect_profile(app: AppHandle, profile_id: String) -> Result<ProfileInspecti
     Ok(ProfileInspection {
         exists: home.exists(),
         has_auth_json: home.join("auth.json").is_file(),
-        has_config_toml: home.join("config.toml").is_file(),
+        has_config_toml: home.join(CODEX_CONFIG_FILENAME).is_file(),
         file_count: count_files(home).map_err(format_io_error)?,
     })
 }
@@ -242,20 +278,19 @@ fn launch_codex(app: AppHandle, profile_id: String) -> Result<(), String> {
         .position(|profile| profile.id == profile_id)
         .ok_or_else(|| "Profile 不存在。".to_string())?;
 
-    let home_path = PathBuf::from(&data.profiles[profile_index].home_path);
-    fs::create_dir_all(&home_path).map_err(format_io_error)?;
-    write_user_env(CODEX_HOME_ENV_KEY, path_to_string(&home_path)?)?;
+    match data.profiles[profile_index].environment_mode {
+        EnvironmentMode::Shared => {
+            let home_path = PathBuf::from(&data.profiles[profile_index].home_path);
+            fs::create_dir_all(&home_path).map_err(format_io_error)?;
+            write_user_env(CODEX_HOME_ENV_KEY, path_to_string(&home_path)?)?;
+            apply_profile_to_home(&app, &data.profiles[profile_index], &home_path)?;
+        }
+        EnvironmentMode::Sandbox => {
+            let home_path = PathBuf::from(&data.profiles[profile_index].home_path);
+            fs::create_dir_all(&home_path).map_err(format_io_error)?;
 
-    match data.profiles[profile_index].auth_mode {
-        AuthMode::Account => delete_user_env(OPENAI_API_KEY)?,
-        AuthMode::ApiKey => {
-            let api_key = data.profiles[profile_index]
-                .api_key
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| "API Key 登录方式需要填写 OPENAI_API_KEY。".to_string())?;
-            write_user_env(OPENAI_API_KEY, api_key.to_string())?;
+            write_user_env(CODEX_HOME_ENV_KEY, path_to_string(&home_path)?)?;
+            apply_profile_auth_to_home(&data.profiles[profile_index], &home_path, false)?;
         }
     }
     broadcast_environment_change();
@@ -269,6 +304,21 @@ fn launch_codex(app: AppHandle, profile_id: String) -> Result<(), String> {
     save_data(&app, &data)
 }
 
+fn apply_profile_env_auth(profile: &Profile) -> Result<(), String> {
+    match profile.auth_mode {
+        AuthMode::Account => delete_user_env(OPENAI_API_KEY),
+        AuthMode::ApiKey => {
+            let api_key = profile
+                .api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "API Key 登录方式需要填写 OPENAI_API_KEY。".to_string())?;
+            write_user_env(OPENAI_API_KEY, api_key.to_string())
+        }
+    }
+}
+
 #[tauri::command]
 fn reveal_profile_folder(app: AppHandle, profile_id: String) -> Result<(), String> {
     let data = load_data(&app)?;
@@ -276,19 +326,6 @@ fn reveal_profile_folder(app: AppHandle, profile_id: String) -> Result<(), Strin
     fs::create_dir_all(&profile.home_path).map_err(format_io_error)?;
     Command::new("explorer.exe")
         .arg(&profile.home_path)
-        .spawn()
-        .map_err(format_io_error)?;
-    Ok(())
-}
-
-fn launch_codex_app(app_id: &str) -> Result<(), String> {
-    let app_id = app_id.trim();
-    if app_id.is_empty() {
-        return Err("Codex AppID 不能为空。".to_string());
-    }
-
-    Command::new("explorer.exe")
-        .arg(format!("shell:AppsFolder\\{app_id}"))
         .spawn()
         .map_err(format_io_error)?;
     Ok(())
@@ -309,30 +346,168 @@ fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
     save_data(&app, &data)
 }
 
+#[tauri::command]
+fn is_codex_process_running() -> bool {
+    codex_process_running()
+}
+
+fn launch_codex_app(app_id: &str) -> Result<(), String> {
+    let app_id = app_id.trim();
+    if app_id.is_empty() {
+        return Err("Codex AppID 不能为空。".to_string());
+    }
+
+    Command::new("explorer.exe")
+        .arg(format!("shell:AppsFolder\\{app_id}"))
+        .spawn()
+        .map_err(format_io_error)?;
+    Ok(())
+}
+
 fn new_profile(
     app: &AppHandle,
     name: &str,
-    source_path: &Path,
+    source_path: Option<&Path>,
     auth_mode: AuthMode,
     api_key: Option<String>,
+    environment_mode: EnvironmentMode,
 ) -> Result<Profile, String> {
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
-    let home_path = managed_profile_home(app, &id)?;
+    let home_path = if environment_mode == EnvironmentMode::Sandbox {
+        managed_profile_home(app, &id)?
+    } else {
+        default_codex_home()?
+    };
+    let auth_json = if matches!(auth_mode, AuthMode::Account) {
+        let source_path = source_path.ok_or_else(|| "账号登录需要选择导入源目录。".to_string())?;
+        Some(read_auth_json(source_path)?)
+    } else {
+        None
+    };
+    let config_toml = match source_path {
+        Some(source_path) => read_config_toml(source_path)?,
+        None => None,
+    };
     Ok(Profile {
         id,
         name: name.to_string(),
         home_path: path_to_string(&home_path)?,
-        import_source_path: Some(path_to_string(source_path)?),
+        import_source_path: source_path.map(path_to_string).transpose()?,
+        environment_mode,
         auth_mode,
         api_key: api_key
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()),
-        managed: true,
+        auth_json,
+        config_toml,
+        managed: environment_mode == EnvironmentMode::Sandbox,
         created_at: now.clone(),
         updated_at: now,
         last_used_at: None,
     })
+}
+
+fn default_codex_home() -> Result<PathBuf, String> {
+    env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let drive = env::var_os("HOMEDRIVE")?;
+            let path = env::var_os("HOMEPATH")?;
+            Some(PathBuf::from(format!(
+                "{}{}",
+                drive.to_string_lossy(),
+                path.to_string_lossy()
+            )))
+        })
+        .map(|home| home.join(".codex"))
+        .ok_or_else(|| "无法定位当前用户 Home 目录。".to_string())
+}
+
+fn read_auth_json(source_path: &Path) -> Result<String, String> {
+    let auth_path = source_path.join("auth.json");
+    if !auth_path.is_file() {
+        return Err("账号登录 Profile 需要导入源目录中存在 auth.json。".to_string());
+    }
+    fs::read_to_string(auth_path).map_err(format_io_error)
+}
+
+fn read_config_toml(source_path: &Path) -> Result<Option<String>, String> {
+    let config_path = source_path.join(CODEX_CONFIG_FILENAME);
+    if !config_path.is_file() {
+        return Ok(None);
+    }
+    fs::read_to_string(config_path)
+        .map(Some)
+        .map_err(format_io_error)
+}
+
+fn read_profile_config_from_managed_home(
+    app: &AppHandle,
+    profile: &Profile,
+) -> Result<Option<String>, String> {
+    let config_path = managed_profile_home(app, &profile.id)?.join(CODEX_CONFIG_FILENAME);
+    if !config_path.is_file() {
+        return Ok(None);
+    }
+    fs::read_to_string(config_path)
+        .map(Some)
+        .map_err(format_io_error)
+}
+
+fn apply_profile_to_home(
+    app: &AppHandle,
+    profile: &Profile,
+    codex_home: &Path,
+) -> Result<(), String> {
+    apply_profile_config_to_home(app, profile, codex_home)?;
+    apply_profile_auth_to_home(profile, codex_home, true)
+}
+
+fn apply_profile_config_to_home(
+    app: &AppHandle,
+    profile: &Profile,
+    codex_home: &Path,
+) -> Result<(), String> {
+    let config_toml = match profile.config_toml.as_deref() {
+        Some(value) => Some(value.to_string()),
+        None => read_profile_config_from_managed_home(app, profile)?,
+    };
+    let Some(config_toml) = config_toml else {
+        return Ok(());
+    };
+
+    fs::create_dir_all(codex_home).map_err(format_io_error)?;
+    fs::write(codex_home.join(CODEX_CONFIG_FILENAME), config_toml).map_err(format_io_error)
+}
+
+fn apply_profile_auth_to_home(
+    profile: &Profile,
+    codex_home: &Path,
+    require_stored_account_auth: bool,
+) -> Result<(), String> {
+    match profile.auth_mode {
+        AuthMode::Account => {
+            delete_user_env(OPENAI_API_KEY)?;
+            let auth_json = profile.auth_json.as_deref();
+            let auth_path = codex_home.join("auth.json");
+            if auth_json.is_none() && !require_stored_account_auth && auth_path.exists() {
+                return Ok(());
+            }
+            let auth_json = auth_json
+                .ok_or_else(|| "此 Profile 没有保存 auth.json，无法切换账号登录态。".to_string())?;
+            fs::create_dir_all(codex_home).map_err(format_io_error)?;
+            fs::write(auth_path, auth_json).map_err(format_io_error)
+        }
+        AuthMode::ApiKey => {
+            fs::create_dir_all(codex_home).map_err(format_io_error)?;
+            let auth_path = codex_home.join("auth.json");
+            if auth_path.exists() {
+                fs::remove_file(auth_path).map_err(format_io_error)?;
+            }
+            apply_profile_env_auth(profile)
+        }
+    }
 }
 
 fn managed_profile_home(app: &AppHandle, profile_id: &str) -> Result<PathBuf, String> {
@@ -351,12 +526,12 @@ fn validate_auth(auth_mode: &AuthMode, api_key: Option<&str>) -> Result<(), Stri
     Ok(())
 }
 
-fn normalized_home_path(home_path: &str) -> Result<PathBuf, String> {
+fn normalize_optional_home_path(home_path: &str) -> Result<Option<PathBuf>, String> {
     let value = home_path.trim();
     if value.is_empty() {
-        return Err("Codex Home 目录不能为空。".to_string());
+        return Ok(None);
     }
-    Ok(PathBuf::from(value))
+    Ok(Some(PathBuf::from(value)))
 }
 
 fn normalized_name(name: &str) -> Result<String, String> {
@@ -381,6 +556,13 @@ fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn data_file(app: &AppHandle) -> Result<PathBuf, String> {
+    if let Some(path) = env::var_os(DATA_FILE_OVERRIDE_ENV_KEY) {
+        let path = PathBuf::from(path);
+        if path.is_absolute() {
+            return Ok(path);
+        }
+        return Ok(app_data_dir(app)?.join(path));
+    }
     Ok(app_data_dir(app)?.join("data.json"))
 }
 
@@ -434,6 +616,22 @@ fn count_files(path: &Path) -> io::Result<usize> {
         }
     }
     Ok(count)
+}
+
+fn codex_process_running() -> bool {
+    let output = Command::new("tasklist.exe")
+        .args(["/FI", &format!("IMAGENAME eq {CODEX_PROCESS_NAME}"), "/NH"])
+        .output();
+    match output {
+        Ok(value) => {
+            let stdout = String::from_utf8_lossy(&value.stdout);
+            let needle = CODEX_PROCESS_NAME.to_lowercase();
+            stdout
+                .lines()
+                .any(|line| line.to_lowercase().contains(&needle))
+        }
+        Err(_) => false,
+    }
 }
 
 fn read_user_env(key: &str) -> Result<Option<String>, String> {
@@ -515,6 +713,7 @@ fn main() {
             launch_codex,
             reveal_profile_folder,
             save_settings,
+            is_codex_process_running,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

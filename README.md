@@ -10,25 +10,54 @@ Tauri desktop helper for switching Codex App profiles on Windows.
 
 ## What It Does
 
-- Imports an existing Codex Home directory into a tool-owned managed Profile directory.
-- Writes the selected Profile home to the user-level `CODEX_HOME` environment variable.
+- Manages multiple Codex Profiles with separate saved auth data.
+- Supports two environment modes: shared environment and sandbox mode.
 - Supports account-login Profiles and API-key Profiles.
 - Launches the Windows Codex App through `shell:AppsFolder`.
 - Can restore default Codex Home behavior by deleting user-level `CODEX_HOME`.
 
-## Profile Behavior
+## Environment Modes
+
+### Shared environment
+
+Shared environment Profiles reuse one Codex Home path and the app switches only the Profile-specific data needed for identity and model behavior:
+
+- Account Profiles write their saved `auth.json` into the shared Home.
+- API-key Profiles write their saved `OPENAI_API_KEY` and remove stale `auth.json` from the shared Home.
+- Profile-specific `config.toml` content is written into the shared Home so model/provider settings switch with the Profile.
+- The app writes user-level `CODEX_HOME` to the shared Home before launch.
+
+This mode is useful when Profiles should share local sessions, caches, tools, and other Codex Home state while still switching accounts and model configuration.
+
+### Sandbox mode
+
+Sandbox mode preserves the original isolated behavior:
 
 - New Profiles copy the selected source Codex Home into `app_data/profiles/<profileId>/home`.
-- The original import source is never modified by Profile launches.
-- Deleting a managed Profile deletes only the tool-owned managed home, not the original source directory.
+- Launching a sandbox Profile writes user-level `CODEX_HOME` to that managed Home.
+- Deleting a sandbox Profile deletes only the tool-owned managed Home, not the original import source.
+
+Use sandbox mode when you want a Profile to keep fully isolated Codex Home state.
+
+## Auth Behavior
+
 - Account-login Profiles clear user-level `OPENAI_API_KEY` before launch.
 - API-key Profiles write their saved key to user-level `OPENAI_API_KEY` before launch.
-- API keys are currently stored in local JSON without encryption.
+- API keys and saved auth/config data are currently stored in local JSON without encryption.
 
 ## Default Launch
 
 - `默认启动 Codex` launches Codex without changing `CODEX_HOME` or `OPENAI_API_KEY`.
 - `恢复默认 Home` deletes user-level `CODEX_HOME`, so manual Codex launches fall back to the default home, usually `C:\Users\frank\.codex`.
+
+## Testing With Alternate Data
+
+Set `CODEX_SWITCH_HELPER_DATA_FILE` to test against another data file without touching the real `data.json`:
+
+```powershell
+$env:CODEX_SWITCH_HELPER_DATA_FILE="C:\Users\frank\AppData\Roaming\com.frank.codex-switch-helper\data-test.json"
+npm run tauri:dev
+```
 
 ## Default Codex AppID
 

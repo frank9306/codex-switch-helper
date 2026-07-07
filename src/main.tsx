@@ -5,6 +5,7 @@ import { open } from '@tauri-apps/plugin-dialog'
 import './style.css'
 
 type AuthMode = 'account' | 'apiKey'
+type EnvironmentMode = 'shared' | 'sandbox'
 type Mode = 'detail' | 'new' | 'edit'
 
 type Profile = {
@@ -12,6 +13,7 @@ type Profile = {
   name: string
   homePath: string
   importSourcePath?: string
+  environmentMode: EnvironmentMode
   authMode: AuthMode
   apiKey?: string
   managed: boolean
@@ -46,6 +48,7 @@ function App() {
   const [mode, setMode] = useState<Mode>('detail')
   const [formName, setFormName] = useState('')
   const [formSourcePath, setFormSourcePath] = useState('')
+  const [formEnvironmentMode, setFormEnvironmentMode] = useState<EnvironmentMode>('shared')
   const [formAuthMode, setFormAuthMode] = useState<AuthMode>('account')
   const [formApiKey, setFormApiKey] = useState('')
   const [codexAppId, setCodexAppId] = useState('')
@@ -62,21 +65,20 @@ function App() {
     setSelectedProfileId((current) => current || nextState.activeProfileId || nextState.profiles[0]?.id || '')
   }
 
+
   async function detectAndSaveCodexAppId(settings: AppSettings) {
     const detected = await invoke<string | null>('detect_codex_app_id')
     setDetectedCodexAppId(detected)
-    if (detected && detected !== settings.codexAppId) {
-      setCodexAppId(detected)
-      await invoke('save_settings', {
-        settings: {
-          ...settings,
-          codexAppId: detected,
-          envKey: 'CODEX_HOME',
-          deleteOpenAiApiKeyBeforeLaunch: false,
-        },
-      })
-      await loadState()
-    }
+    if (!detected || settings.codexAppId === detected) return
+    await invoke('save_settings', {
+      settings: {
+        ...settings,
+        codexAppId: detected,
+        envKey: 'CODEX_HOME',
+        deleteOpenAiApiKeyBeforeLaunch: false,
+      },
+    })
+    setCodexAppId(detected)
   }
 
   useEffect(() => {
@@ -104,6 +106,7 @@ function App() {
     setMode('new')
     setFormName('')
     setFormSourcePath('')
+    setFormEnvironmentMode('shared')
     setFormAuthMode('account')
     setFormApiKey('')
     setMessage('')
@@ -113,6 +116,7 @@ function App() {
     setMode('edit')
     setFormName(profile.name)
     setFormSourcePath(profile.importSourcePath || '')
+    setFormEnvironmentMode(profile.environmentMode || 'sandbox')
     setFormAuthMode(profile.authMode || 'account')
     setFormApiKey(profile.apiKey || '')
     setMessage('')
@@ -162,10 +166,11 @@ function App() {
           sourcePath: formSourcePath,
           authMode: formAuthMode,
           apiKey: formAuthMode === 'apiKey' ? formApiKey : null,
+          environmentMode: formEnvironmentMode,
         })
         setSelectedProfileId(profile.id)
         setMode('detail')
-        return `已导入并创建 Profile：${profile.name}`
+        return `已创建 Profile：${profile.name}`
       }
 
       if (!selectedProfile) return
@@ -182,9 +187,12 @@ function App() {
   }
 
   async function launchProfile(profileId: string) {
+    const profile = state?.profiles.find((item) => item.id === profileId)
     await runAction(async () => {
       await invoke('launch_codex', { profileId })
-      return '已按当前 Profile 设置 CODEX_HOME 和 OPENAI_API_KEY，并启动 Codex。'
+      return profile?.environmentMode === 'shared'
+        ? '已写回此 Profile 的登录数据和配置，并使用共享 Home 启动 Codex。'
+        : '已按当前 Profile 设置 CODEX_HOME 和 OPENAI_API_KEY，并启动 Codex。'
     })
   }
 
@@ -226,7 +234,11 @@ function App() {
   }
 
   async function deleteProfile(profile: Profile) {
-    const confirmed = window.confirm(`确认删除 Profile「${profile.name}」？会删除本工具托管的 Home 目录，不会删除原始导入目录。`)
+    const confirmed = window.confirm(
+      profile.environmentMode === 'sandbox'
+        ? `确认删除 Profile「${profile.name}」？会删除本工具托管的 Home 目录，不会删除原始导入目录。`
+        : `确认删除 Profile「${profile.name}」？只会删除本工具保存的登录数据，不会删除默认 Codex Home。`,
+    )
     if (!confirmed) return
 
     await runAction(async () => {
@@ -243,7 +255,9 @@ function App() {
 
   const formIsValid =
     formName.trim() &&
-    (mode === 'edit' || formSourcePath.trim()) &&
+    (mode === 'edit' ||
+      (formEnvironmentMode === 'shared' && formAuthMode === 'apiKey') ||
+      formSourcePath.trim()) &&
     (formAuthMode === 'account' || formApiKey.trim())
 
   return (
@@ -294,6 +308,7 @@ function App() {
             >
               <strong>{profile.name}</strong>
               <span>{profile.homePath}</span>
+              <em>{(profile.environmentMode || 'sandbox') === 'sandbox' ? '沙盒模式' : '共享环境'}</em>
               {profile.id === state.activeProfileId && <em>当前激活</em>}
             </button>
           ))}
@@ -308,11 +323,13 @@ function App() {
               mode={mode}
               name={formName}
               sourcePath={formSourcePath}
+              environmentMode={formEnvironmentMode}
               onApiKeyChange={setFormApiKey}
               onAuthModeChange={setFormAuthMode}
               onCancel={() => setMode('detail')}
               onChooseDirectory={chooseSourceDirectory}
               onNameChange={setFormName}
+              onEnvironmentModeChange={setFormEnvironmentMode}
               onSave={saveProfileForm}
               onSourcePathChange={setFormSourcePath}
               valid={Boolean(formIsValid)}
@@ -330,7 +347,7 @@ function App() {
           ) : (
             <div className="empty-state">
               <h2>选择或新建一个 Profile</h2>
-              <p>新建时选择一个源目录，工具会复制到自动生成的托管 Home。启动时按 Profile 登录方式处理环境变量。</p>
+              <p>新建时默认只保存登录数据并共享默认 Codex Home；需要隔离时可选择沙盒模式。</p>
               <button className="primary-action" onClick={startNewProfile} type="button">
                 新建 Profile
               </button>
@@ -361,6 +378,7 @@ function App() {
               </button>
             </div>
           )}
+
         </section>
       </section>
     </main>
@@ -371,6 +389,7 @@ function ProfileForm(props: {
   apiKey: string
   authMode: AuthMode
   busy: boolean
+  environmentMode: EnvironmentMode
   mode: 'new' | 'edit'
   name: string
   sourcePath: string
@@ -379,6 +398,7 @@ function ProfileForm(props: {
   onAuthModeChange: (value: AuthMode) => void
   onCancel: () => void
   onChooseDirectory: () => void
+  onEnvironmentModeChange: (value: EnvironmentMode) => void
   onNameChange: (value: string) => void
   onSave: () => void
   onSourcePathChange: (value: string) => void
@@ -387,7 +407,7 @@ function ProfileForm(props: {
     <div className="form-shell">
       <div className="section-title">
         <h2>{props.mode === 'new' ? '新建 Profile' : '编辑 Profile'}</h2>
-        <p>{props.mode === 'new' ? '选择一个源目录，创建时会复制到工具自动生成的托管 Home。' : '编辑名称和登录方式。托管 Home 目录不会在这里修改。'}</p>
+        <p>{props.mode === 'new' ? '默认只保存登录数据，共享默认 Codex Home；沙盒模式才复制完整环境。' : '编辑名称和登录方式。环境模式创建后不在这里修改。'}</p>
       </div>
 
       <label>
@@ -397,14 +417,35 @@ function ProfileForm(props: {
 
       {props.mode === 'new' && (
         <div className="field-block">
-          <span>导入源目录</span>
+          <span>环境模式</span>
+          <div className="segmented">
+            <button className={props.environmentMode === 'shared' ? 'active' : ''} onClick={() => props.onEnvironmentModeChange('shared')} type="button">
+              共享环境
+            </button>
+            <button className={props.environmentMode === 'sandbox' ? 'active' : ''} onClick={() => props.onEnvironmentModeChange('sandbox')} type="button">
+              沙盒模式
+            </button>
+          </div>
+          <p className="hint">共享环境共用同一个 Codex Home，启动时写回登录数据和配置；沙盒模式复制完整环境并隔离启动。</p>
+        </div>
+      )}
+
+      {props.mode === 'new' && (
+        <div className="field-block">
+          <span>{props.environmentMode === 'shared' && props.authMode === 'apiKey' ? '导入源目录（可选）' : '导入源目录'}</span>
           <div className="path-picker">
             <input placeholder="选择一个已有 Codex Home 目录" value={props.sourcePath} onChange={(event) => props.onSourcePathChange(event.target.value)} />
             <button className="secondary-action" disabled={props.busy} onClick={props.onChooseDirectory} type="button">
               选择目录
             </button>
           </div>
-          <p className="hint">源目录会被复制，之后 Profile 使用自动生成的托管目录，不会继续写入源目录。</p>
+          <p className="hint">
+            {props.environmentMode === 'sandbox'
+              ? '源目录会被复制，之后 Profile 使用自动生成的托管目录，不会继续写入源目录。'
+              : props.authMode === 'account'
+                ? '账号登录需要从此目录读取并保存 auth.json，不复制其他环境文件。'
+                : 'API Key 共享环境不需要导入源目录；填写后仅记录来源。'}
+          </p>
         </div>
       )}
 
@@ -418,7 +459,7 @@ function ProfileForm(props: {
             API Key 登录
           </button>
         </div>
-        <p className="hint">账号登录启动时会清除用户级 OPENAI_API_KEY；API Key 登录启动时会写入本 Profile 的 key。</p>
+        <p className="hint">账号登录会保存并写回 auth.json；API Key 登录会写入本 Profile 的 key。</p>
       </div>
 
       {props.authMode === 'apiKey' && (
@@ -449,12 +490,13 @@ function ProfileDetail(props: {
   onLaunch: () => void
   onReveal: () => void
 }) {
+  const isSandbox = (props.profile.environmentMode || 'sandbox') === 'sandbox'
   return (
     <div className="form-shell">
       <div className="panel-header">
         <div className="section-title">
           <h2>{props.profile.name}</h2>
-          <p>当前选中的托管式 Codex Home 配置。</p>
+          <p>{isSandbox ? '当前选中的沙盒 Codex Home 配置。' : '当前选中的共享环境登录配置。'}</p>
         </div>
         <button className="secondary-action" disabled={props.busy} onClick={props.onEdit} type="button">
           编辑
@@ -463,8 +505,12 @@ function ProfileDetail(props: {
 
       <dl className="facts">
         <div>
-          <dt>托管 Codex Home</dt>
+          <dt>{isSandbox ? '托管 Codex Home' : '默认 Codex Home'}</dt>
           <dd>{props.profile.homePath}</dd>
+        </div>
+        <div>
+          <dt>环境模式</dt>
+          <dd>{isSandbox ? '沙盒模式' : '共享环境'}</dd>
         </div>
         <div>
           <dt>导入来源</dt>
@@ -492,9 +538,9 @@ function ProfileDetail(props: {
         <button className="primary-action" disabled={props.busy} onClick={props.onLaunch} type="button">
           用此 Profile 启动 Codex
         </button>
-        <button className="secondary-action" disabled={props.busy} onClick={props.onReveal} type="button">
+        {isSandbox && <button className="secondary-action" disabled={props.busy} onClick={props.onReveal} type="button">
           打开托管目录
-        </button>
+        </button>}
         <button className="danger" disabled={props.busy} onClick={props.onDelete} type="button">
           删除 Profile
         </button>

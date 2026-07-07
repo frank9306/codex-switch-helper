@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.3 - 2026-07-07
+
+- Reworked Profile switching around two environment modes: shared environment and sandbox mode.
+- Shared environment Profiles now reuse one Codex Home while switching saved auth data and Profile-specific `config.toml` content.
+- Sandbox mode preserves the previous isolated behavior by copying a source Codex Home into a tool-owned Profile home and launching with `CODEX_HOME` set to that home.
+- Removed the Shared Library feature and related skills/prompts/MCP/sessions toggles.
+- Added `CODEX_SWITCH_HELPER_DATA_FILE` for testing against an alternate data file without touching the user's real `data.json`.
+- API-key launches now remove stale `auth.json` from the target Home to avoid showing the previous account.
+
 ## 0.1.2 - 2026-07-03
 
 - Reverted the release workflow dependency install step back to `npm ci` after merging the lockfile fix.
