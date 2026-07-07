@@ -15,6 +15,7 @@ Tauri desktop helper for switching Codex App profiles on Windows.
 - Supports account-login Profiles and API-key Profiles.
 - Launches the Windows Codex App through `shell:AppsFolder`.
 - Can restore default Codex Home behavior by deleting user-level `CODEX_HOME`.
+- Checks for app updates through signed Tauri updater artifacts published on GitHub Releases.
 
 ## Environment Modes
 
@@ -81,6 +82,17 @@ npm run tauri:build
 ```
 
 On Windows, Rust/Tauri requires the Visual Studio Build Tools C++ toolchain. If `cargo check` or `tauri build` reports `link.exe not found`, install Visual Studio Build Tools with the C++ workload.
+
+## App Updates
+
+The app checks GitHub Releases for signed updater metadata at startup and also provides a manual update check in the settings panel.
+
+Before publishing updater-enabled releases, add these repository secrets:
+
+- `TAURI_SIGNING_PRIVATE_KEY`: contents of `updater.key.local`
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: contents of `updater.key.password.local`
+
+Keep both files private. Losing the key or password prevents installed apps from accepting future updates.
 
 ## Release
 

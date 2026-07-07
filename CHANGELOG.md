@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.4 - 2026-07-07
+
+- Added signed Tauri updater support backed by GitHub Releases.
+- Added startup and manual update checks in the app UI.
+- Updated the release workflow to publish updater-compatible artifacts and metadata.
+- Redesigned the app UI as a light dashboard with summary cards and a left navigation rail.
+- Added the Tauri process plugin required to relaunch after installing updates.
+
 ## 0.1.3 - 2026-07-07
 
 - Reworked Profile switching around two environment modes: shared environment and sandbox mode.

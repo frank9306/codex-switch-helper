@@ -15,6 +15,7 @@
 - 支持账号登录 Profile 和 API Key 登录 Profile。
 - 通过 `shell:AppsFolder` 启动 Windows Codex App。
 - 可以删除用户级 `CODEX_HOME`，恢复 Codex 默认 Home 行为。
+- 通过发布到 GitHub Releases 的 Tauri 签名更新产物检查和安装应用更新。
 
 ## 环境模式
 
@@ -81,6 +82,17 @@ npm run tauri:build
 ```
 
 Windows 上 Tauri/Rust 需要 Visual Studio Build Tools C++ 工具链。如果 `cargo check` 或 `tauri build` 报 `link.exe not found`，请安装带 C++ workload 的 Visual Studio Build Tools。
+
+## 应用更新
+
+应用启动时会检查 GitHub Releases 上的签名更新元数据，也可以在设置面板手动检查更新。
+
+发布支持自动更新的版本前，需要添加这些 GitHub 仓库 secrets：
+
+- `TAURI_SIGNING_PRIVATE_KEY`：`updater.key.local` 的内容
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`：`updater.key.password.local` 的内容
+
+这两个文件必须保密。如果丢失私钥或密码，已安装的应用将无法接受后续更新。
 
 ## 发布
 

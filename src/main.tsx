@@ -1,7 +1,10 @@
 import React, { useEffect, useState } from 'react'
+import { getVersion } from '@tauri-apps/api/app'
 import { createRoot } from 'react-dom/client'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
+import { relaunch } from '@tauri-apps/plugin-process'
+import { check } from '@tauri-apps/plugin-updater'
 import './style.css'
 
 type AuthMode = 'account' | 'apiKey'
@@ -57,6 +60,9 @@ function App() {
   const [inspection, setInspection] = useState<ProfileInspection | null>(null)
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
+  const [appVersion, setAppVersion] = useState('')
+  const [updateBusy, setUpdateBusy] = useState(false)
+  const [updateProgress, setUpdateProgress] = useState('')
 
   async function loadState() {
     const nextState = await invoke<AppState>('get_app_state')
@@ -65,6 +71,47 @@ function App() {
     setSelectedProfileId((current) => current || nextState.activeProfileId || nextState.profiles[0]?.id || '')
   }
 
+  async function checkForUpdate(silent = false) {
+    setUpdateBusy(true)
+    setUpdateProgress('')
+    if (!silent) setMessage('')
+
+    try {
+      const update = await check()
+      if (!update) {
+        if (!silent) setMessage('当前已是最新版本。')
+        return
+      }
+
+      const confirmed = window.confirm(
+        `发现新版本 ${update.version}。是否现在下载并安装？安装完成后应用会重启。`,
+      )
+      if (!confirmed) return
+
+      let downloaded = 0
+      let contentLength = 0
+      await update.downloadAndInstall((event) => {
+        switch (event.event) {
+          case 'Started':
+            contentLength = event.data.contentLength ?? 0
+            setUpdateProgress('开始下载更新...')
+            break
+          case 'Progress':
+            downloaded += event.data.chunkLength
+            setUpdateProgress(contentLength ? `下载中 ${Math.round((downloaded / contentLength) * 100)}%` : '下载中...')
+            break
+          case 'Finished':
+            setUpdateProgress('安装完成，正在重启...')
+            break
+        }
+      })
+      await relaunch()
+    } catch (error) {
+      if (!silent) setMessage(`检查更新失败：${String(error)}`)
+    } finally {
+      setUpdateBusy(false)
+    }
+  }
 
   async function detectAndSaveCodexAppId(settings: AppSettings) {
     const detected = await invoke<string | null>('detect_codex_app_id')
@@ -84,8 +131,10 @@ function App() {
   useEffect(() => {
     loadState()
       .then(async () => {
+        getVersion().then(setAppVersion).catch(() => setAppVersion(''))
         const nextState = await invoke<AppState>('get_app_state')
         await detectAndSaveCodexAppId(nextState.settings)
+        await checkForUpdate(true)
       })
       .catch((error) => setMessage(String(error)))
   }, [])
@@ -259,126 +308,190 @@ function App() {
       (formEnvironmentMode === 'shared' && formAuthMode === 'apiKey') ||
       formSourcePath.trim()) &&
     (formAuthMode === 'account' || formApiKey.trim())
+  const sharedProfiles = state.profiles.filter((profile) => profile.environmentMode === 'shared').length
+  const sandboxProfiles = state.profiles.filter((profile) => (profile.environmentMode || 'sandbox') === 'sandbox').length
+  const accountProfiles = state.profiles.filter((profile) => profile.authMode === 'account').length
+  const apiKeyProfiles = state.profiles.filter((profile) => profile.authMode === 'apiKey').length
+  const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId)
+  const stats = [
+    { label: '账号总数', value: state.profiles.length, icon: '👥', tone: 'blue' },
+    { label: '共享环境', value: sharedProfiles, icon: '↔', tone: 'green' },
+    { label: '沙盒环境', value: sandboxProfiles, icon: '◎', tone: 'cyan' },
+    { label: '账号登录', value: accountProfiles, icon: '◆', tone: 'purple' },
+    { label: 'API Key', value: apiKeyProfiles, icon: '⌁', tone: 'mint' },
+  ]
 
   return (
     <main className="shell">
-      <section className="topbar">
-        <div className="brand-lockup">
-          <span className="brand-mark">C</span>
-          <div>
-            <p className="eyebrow">Codex Switch Helper</p>
-            <h1>Profiles</h1>
-          </div>
-        </div>
-        <div className="current-env">
-          <span>System CODEX_HOME</span>
-          <code>{state.currentCodexHome || '未设置'}</code>
-        </div>
-        <div className="global-actions">
-          <button className="primary-action" disabled={busy} onClick={launchDefaultCodex} type="button">
-            默认启动 Codex
-          </button>
-          <button className="secondary-action" disabled={busy} onClick={restoreDefaultHome} type="button">
-            恢复默认 Home
-          </button>
-          <p>默认启动不修改环境；恢复默认 Home 只删除 CODEX_HOME，不处理 OPENAI_API_KEY。</p>
-        </div>
-      </section>
+      <aside className="side-rail" aria-label="主导航">
+        <span className="rail-dot rail-close" />
+        <span className="rail-dot rail-minimize" />
+        <span className="rail-dot rail-zoom" />
+        <button className="rail-item active" type="button" aria-label="Profiles">🚀</button>
+        <button className="rail-item" type="button" aria-label="Dashboard">◎</button>
+        <button className="rail-item" type="button" aria-label="Settings" onClick={() => setAdvancedOpen((value) => !value)}>⚙</button>
+      </aside>
 
-      {message && <div className="message">{message}</div>}
-
-      <section className="grid">
-        <aside className="panel profile-list">
-          <div className="panel-header">
-            <h2>Profile 列表</h2>
-            <span>{state.profiles.length} 个</span>
-          </div>
-          <button className="primary-action full-width no-margin" disabled={busy} onClick={startNewProfile} type="button">
-            新建 Profile
-          </button>
-
-          {state.profiles.length === 0 && <p className="empty list-empty">还没有 Profile，点击上方新建。</p>}
-
-          {state.profiles.map((profile) => (
-            <button
-              className={`profile-item ${profile.id === selectedProfileId && mode === 'detail' ? 'active' : ''}`}
-              key={profile.id}
-              onClick={() => showProfile(profile.id)}
-              type="button"
-            >
-              <strong>{profile.name}</strong>
-              <span>{profile.homePath}</span>
-              <em>{(profile.environmentMode || 'sandbox') === 'sandbox' ? '沙盒模式' : '共享环境'}</em>
-              {profile.id === state.activeProfileId && <em>当前激活</em>}
-            </button>
-          ))}
-        </aside>
-
-        <section className="panel workspace-panel">
-          {mode === 'new' || mode === 'edit' ? (
-            <ProfileForm
-              apiKey={formApiKey}
-              authMode={formAuthMode}
-              busy={busy}
-              mode={mode}
-              name={formName}
-              sourcePath={formSourcePath}
-              environmentMode={formEnvironmentMode}
-              onApiKeyChange={setFormApiKey}
-              onAuthModeChange={setFormAuthMode}
-              onCancel={() => setMode('detail')}
-              onChooseDirectory={chooseSourceDirectory}
-              onNameChange={setFormName}
-              onEnvironmentModeChange={setFormEnvironmentMode}
-              onSave={saveProfileForm}
-              onSourcePathChange={setFormSourcePath}
-              valid={Boolean(formIsValid)}
-            />
-          ) : selectedProfile ? (
-            <ProfileDetail
-              busy={busy}
-              inspection={inspection}
-              profile={selectedProfile}
-              onDelete={() => deleteProfile(selectedProfile)}
-              onEdit={() => startEditProfile(selectedProfile)}
-              onLaunch={() => launchProfile(selectedProfile.id)}
-              onReveal={() => revealProfile(selectedProfile.id)}
-            />
-          ) : (
-            <div className="empty-state">
-              <h2>选择或新建一个 Profile</h2>
-              <p>新建时默认只保存登录数据并共享默认 Codex Home；需要隔离时可选择沙盒模式。</p>
-              <button className="primary-action" onClick={startNewProfile} type="button">
-                新建 Profile
-              </button>
+      <section className="dashboard">
+        <section className="topbar">
+          <div className="brand-lockup">
+            <span className="brand-mark">C</span>
+            <div>
+              <p className="eyebrow">Codex Switch Helper</p>
+              <h1>仪表盘</h1>
             </div>
-          )}
+          </div>
+          <div className="header-actions">
+            <button className="secondary-action" disabled={busy} onClick={restoreDefaultHome} type="button">
+              恢复默认 Home
+            </button>
+            <button className="primary-action" disabled={busy} onClick={launchDefaultCodex} type="button">
+              默认启动 Codex
+            </button>
+          </div>
         </section>
 
-        <section className="panel settings-panel">
-          <button className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)} type="button">
-            高级设置
-            <span>{advancedOpen ? '收起' : '展开'}</span>
-          </button>
+        {message && <div className="message">{message}</div>}
 
-          {advancedOpen && (
-            <div className="advanced-body">
-              <div className="section-title">
-                <h2>Codex App 启动</h2>
-                <p>AppID 会自动扫描。扫描不到或启动失败时，再手动修改。</p>
+        <section className="stats-grid">
+          {stats.map((item) => (
+            <article className="stat-card" key={item.label}>
+              <span className={`stat-icon ${item.tone}`}>{item.icon}</span>
+              <div>
+                <p>{item.label}</p>
+                <strong>{item.value}</strong>
               </div>
-              <label>
-                <span>Codex AppID</span>
-                <input value={codexAppId} onChange={(event) => setCodexAppId(event.target.value)} />
-              </label>
-              <p className="hint">自动扫描结果：{detectedCodexAppId || '未检测到'}</p>
-              <p className="hint">OPENAI_API_KEY 由每个 Profile 的登录方式自动处理，账号登录会清除，API Key 登录会写入。</p>
-              <button className="secondary-action full-width" disabled={busy || !codexAppId.trim()} onClick={saveSettings} type="button">
-                保存高级设置
+            </article>
+          ))}
+        </section>
+
+        <section className="overview-card">
+          <div className="section-title">
+            <h2>当前环境</h2>
+            <p>默认启动不修改环境；恢复默认 Home 只删除 CODEX_HOME，不处理 OPENAI_API_KEY。</p>
+          </div>
+          <div className="env-card">
+            <span>System CODEX_HOME</span>
+            <code>{state.currentCodexHome || '未设置'}</code>
+          </div>
+          <div className="active-profile">
+            <span>当前激活 Profile</span>
+            <strong>{activeProfile?.name || '未激活'}</strong>
+          </div>
+        </section>
+
+        <section className="content-grid">
+          <aside className="panel profile-list">
+            <div className="panel-header">
+              <div className="section-title">
+                <h2>Profiles</h2>
+                <p>{state.profiles.length} 个账号配置</p>
+              </div>
+              <button className="primary-action compact" disabled={busy} onClick={startNewProfile} type="button">
+                新建
               </button>
             </div>
-          )}
 
+            {state.profiles.length === 0 && <p className="empty list-empty">还没有 Profile，点击上方新建。</p>}
+
+            <div className="profile-stack">
+              {state.profiles.map((profile) => (
+                <button
+                  className={`profile-item ${profile.id === selectedProfileId && mode === 'detail' ? 'active' : ''}`}
+                  key={profile.id}
+                  onClick={() => showProfile(profile.id)}
+                  type="button"
+                >
+                  <span className="profile-avatar">{(profile.name || 'C').slice(0, 1).toUpperCase()}</span>
+                  <span className="profile-copy">
+                    <strong>{profile.name}</strong>
+                    <small>{profile.homePath}</small>
+                  </span>
+                  <span className="profile-badges">
+                    <em>{(profile.environmentMode || 'sandbox') === 'sandbox' ? '沙盒' : '共享'}</em>
+                    {profile.id === state.activeProfileId && <em className="hot">当前</em>}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </aside>
+
+          <section className="panel workspace-panel">
+            {mode === 'new' || mode === 'edit' ? (
+              <ProfileForm
+                apiKey={formApiKey}
+                authMode={formAuthMode}
+                busy={busy}
+                mode={mode}
+                name={formName}
+                sourcePath={formSourcePath}
+                environmentMode={formEnvironmentMode}
+                onApiKeyChange={setFormApiKey}
+                onAuthModeChange={setFormAuthMode}
+                onCancel={() => setMode('detail')}
+                onChooseDirectory={chooseSourceDirectory}
+                onNameChange={setFormName}
+                onEnvironmentModeChange={setFormEnvironmentMode}
+                onSave={saveProfileForm}
+                onSourcePathChange={setFormSourcePath}
+                valid={Boolean(formIsValid)}
+              />
+            ) : selectedProfile ? (
+              <ProfileDetail
+                busy={busy}
+                inspection={inspection}
+                profile={selectedProfile}
+                onDelete={() => deleteProfile(selectedProfile)}
+                onEdit={() => startEditProfile(selectedProfile)}
+                onLaunch={() => launchProfile(selectedProfile.id)}
+                onReveal={() => revealProfile(selectedProfile.id)}
+              />
+            ) : (
+              <div className="empty-state">
+                <h2>选择或新建一个 Profile</h2>
+                <p>新建时默认只保存登录数据并共享默认 Codex Home；需要隔离时可选择沙盒模式。</p>
+                <button className="primary-action" onClick={startNewProfile} type="button">
+                  新建 Profile
+                </button>
+              </div>
+            )}
+          </section>
+
+          <section className="panel settings-panel">
+            <div className="update-card">
+              <div className="section-title">
+                <h2>应用更新</h2>
+                <p>当前版本：{appVersion || '未知'}。启动时会自动检查一次，也可以手动检查。</p>
+              </div>
+              {updateProgress && <p className="hint">{updateProgress}</p>}
+              <button className="secondary-action full-width" disabled={updateBusy} onClick={() => checkForUpdate(false)} type="button">
+                {updateBusy ? '检查中...' : '检查更新'}
+              </button>
+            </div>
+
+            <button className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)} type="button">
+              高级设置
+              <span>{advancedOpen ? '收起' : '展开'}</span>
+            </button>
+
+            {advancedOpen && (
+              <div className="advanced-body">
+                <div className="section-title">
+                  <h2>Codex App 启动</h2>
+                  <p>AppID 会自动扫描。扫描不到或启动失败时，再手动修改。</p>
+                </div>
+                <label>
+                  <span>Codex AppID</span>
+                  <input value={codexAppId} onChange={(event) => setCodexAppId(event.target.value)} />
+                </label>
+                <p className="hint">自动扫描结果：{detectedCodexAppId || '未检测到'}</p>
+                <p className="hint">OPENAI_API_KEY 由每个 Profile 的登录方式自动处理，账号登录会清除，API Key 登录会写入。</p>
+                <button className="secondary-action full-width" disabled={busy || !codexAppId.trim()} onClick={saveSettings} type="button">
+                  保存高级设置
+                </button>
+              </div>
+            )}
+          </section>
         </section>
       </section>
     </main>
