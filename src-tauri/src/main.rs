@@ -14,6 +14,9 @@ use winreg::{enums::HKEY_CURRENT_USER, RegKey};
 const DEFAULT_CODEX_APP_ID: &str = "OpenAI.Codex_2p2nqsd0c76g0!App";
 const CODEX_HOME_ENV_KEY: &str = "CODEX_HOME";
 const OPENAI_API_KEY: &str = "OPENAI_API_KEY";
+const HTTP_PROXY_ENV_KEY: &str = "HTTP_PROXY";
+const HTTPS_PROXY_ENV_KEY: &str = "HTTPS_PROXY";
+const ALL_PROXY_ENV_KEY: &str = "ALL_PROXY";
 const DATA_FILE_OVERRIDE_ENV_KEY: &str = "CODEX_SWITCH_HELPER_DATA_FILE";
 
 const CODEX_PROCESS_NAME: &str = "Codex.exe";
@@ -31,6 +34,14 @@ struct Profile {
     #[serde(default)]
     auth_mode: AuthMode,
     api_key: Option<String>,
+    #[serde(default)]
+    api_provider: Option<String>,
+    #[serde(default)]
+    api_base_url: Option<String>,
+    #[serde(default)]
+    api_route_enabled: bool,
+    #[serde(default)]
+    api_route_model: Option<String>,
     auth_json: Option<String>,
     config_toml: Option<String>,
     #[serde(default)]
@@ -62,6 +73,14 @@ struct AppSettings {
     codex_app_id: String,
     env_key: String,
     delete_open_ai_api_key_before_launch: bool,
+    #[serde(default)]
+    proxy_enabled: bool,
+    #[serde(default = "default_proxy_protocol")]
+    proxy_protocol: String,
+    #[serde(default)]
+    proxy_host: String,
+    #[serde(default)]
+    proxy_port: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,12 +109,24 @@ struct ProfileInspection {
     file_count: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectionTestResult {
+    ok: bool,
+    status: String,
+    endpoint: String,
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
             codex_app_id: DEFAULT_CODEX_APP_ID.to_string(),
             env_key: CODEX_HOME_ENV_KEY.to_string(),
             delete_open_ai_api_key_before_launch: false,
+            proxy_enabled: false,
+            proxy_protocol: default_proxy_protocol(),
+            proxy_host: String::new(),
+            proxy_port: String::new(),
         }
     }
 }
@@ -113,6 +144,7 @@ impl Default for StoredData {
 #[tauri::command]
 fn get_app_state(app: AppHandle) -> Result<AppState, String> {
     let data = load_data(&app)?;
+    apply_proxy_settings_to_current_process(&data.settings)?;
     Ok(AppState {
         profiles: data.profiles,
         settings: data.settings,
@@ -128,19 +160,40 @@ fn create_profile(
     source_path: String,
     auth_mode: AuthMode,
     api_key: Option<String>,
+    auth_json_path: Option<String>,
+    api_provider: Option<String>,
+    api_base_url: Option<String>,
+    api_route_enabled: bool,
+    api_route_model: Option<String>,
     environment_mode: EnvironmentMode,
 ) -> Result<Profile, String> {
     let name = normalized_name(&name)?;
     validate_auth(&auth_mode, api_key.as_deref())?;
+    validate_api_route(
+        &auth_mode,
+        api_route_enabled,
+        api_base_url.as_deref(),
+        api_route_model.as_deref(),
+    )?;
     let source_path = normalize_optional_home_path(&source_path)?;
-    if matches!(environment_mode, EnvironmentMode::Sandbox)
-        || matches!(auth_mode, AuthMode::Account)
-    {
+    let auth_json_path =
+        normalize_optional_home_path(auth_json_path.as_deref().unwrap_or_default())?;
+    if matches!(environment_mode, EnvironmentMode::Sandbox) {
         let source_path = source_path
             .as_deref()
-            .ok_or_else(|| "账号登录或沙盒模式需要选择导入源目录。".to_string())?;
+            .ok_or_else(|| "沙盒模式需要选择导入源目录。".to_string())?;
         if !source_path.is_dir() {
             return Err("导入源目录不存在或不是目录。".to_string());
+        }
+    }
+    if let Some(auth_json_path) = auth_json_path.as_deref() {
+        if !auth_json_path.is_file() {
+            return Err("auth.json 文件不存在。".to_string());
+        }
+    }
+    if let Some(source_path) = source_path.as_deref() {
+        if !source_path.is_dir() {
+            return Err("Codex Home 目录不存在或不是目录。".to_string());
         }
     }
 
@@ -151,6 +204,11 @@ fn create_profile(
         source_path.as_deref(),
         auth_mode,
         api_key,
+        auth_json_path.as_deref(),
+        api_provider,
+        api_base_url,
+        api_route_enabled,
+        api_route_model,
         environment_mode,
     )?;
     if profile.environment_mode == EnvironmentMode::Sandbox {
@@ -174,9 +232,22 @@ fn update_profile(
     name: String,
     auth_mode: AuthMode,
     api_key: Option<String>,
+    auth_json_path: Option<String>,
+    api_provider: Option<String>,
+    api_base_url: Option<String>,
+    api_route_enabled: bool,
+    api_route_model: Option<String>,
 ) -> Result<Profile, String> {
     let name = normalized_name(&name)?;
     validate_auth(&auth_mode, api_key.as_deref())?;
+    validate_api_route(
+        &auth_mode,
+        api_route_enabled,
+        api_base_url.as_deref(),
+        api_route_model.as_deref(),
+    )?;
+    let auth_json_path =
+        normalize_optional_home_path(auth_json_path.as_deref().unwrap_or_default())?;
 
     let mut data = load_data(&app)?;
     let profile = data
@@ -189,6 +260,26 @@ fn update_profile(
     profile.api_key = api_key
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    profile.api_provider = normalize_optional_string(api_provider);
+    profile.api_base_url = normalize_optional_string(api_base_url);
+    profile.api_route_enabled = api_route_enabled;
+    profile.api_route_model = normalize_optional_string(api_route_model);
+    if matches!(auth_mode, AuthMode::Account) {
+        if let Some(auth_json_path) = auth_json_path.as_deref() {
+            if !auth_json_path.is_file() {
+                return Err("auth.json 文件不存在。".to_string());
+            }
+            profile.auth_json = Some(fs::read_to_string(auth_json_path).map_err(format_io_error)?);
+        }
+    } else {
+        profile.auth_json = None;
+        if api_route_enabled {
+            profile.config_toml = Some(build_api_route_config(
+                profile.api_base_url.as_deref().unwrap_or_default(),
+                profile.api_route_model.as_deref().unwrap_or_default(),
+            ));
+        }
+    }
     profile.updated_at = Utc::now().to_rfc3339();
     let updated = profile.clone();
     save_data(&app, &data)?;
@@ -243,6 +334,7 @@ if ($candidate) { $candidate; exit }
 #[tauri::command]
 fn launch_default_codex(app: AppHandle) -> Result<(), String> {
     let data = load_data(&app)?;
+    apply_proxy_settings(&data.settings)?;
     launch_codex_app(&data.settings.codex_app_id)
 }
 
@@ -270,6 +362,47 @@ fn inspect_profile(app: AppHandle, profile_id: String) -> Result<ProfileInspecti
 }
 
 #[tauri::command]
+fn test_profile_connection(
+    app: AppHandle,
+    profile_id: String,
+) -> Result<ConnectionTestResult, String> {
+    let data = load_data(&app)?;
+    let profile = find_profile(&data, &profile_id)?;
+    test_connection_for_profile(profile)
+}
+
+#[tauri::command]
+fn test_login_connection(
+    auth_mode: AuthMode,
+    api_key: Option<String>,
+    auth_json_path: Option<String>,
+    source_path: Option<String>,
+    api_base_url: Option<String>,
+) -> Result<ConnectionTestResult, String> {
+    match auth_mode {
+        AuthMode::ApiKey => {
+            let endpoint = models_endpoint(api_base_url.as_deref());
+            let api_key = api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "测试 API Key 需要先填写 Key。".to_string())?;
+            test_http_bearer(&endpoint, api_key)
+        }
+        AuthMode::Account => {
+            let auth_json =
+                read_account_test_auth_json(auth_json_path.as_deref(), source_path.as_deref())?;
+            validate_auth_json_content(&auth_json)?;
+            Ok(ConnectionTestResult {
+                ok: true,
+                status: "auth.json 可读取".to_string(),
+                endpoint: "local auth.json".to_string(),
+            })
+        }
+    }
+}
+
+#[tauri::command]
 fn launch_codex(app: AppHandle, profile_id: String) -> Result<(), String> {
     let mut data = load_data(&app)?;
     let profile_index = data
@@ -290,11 +423,22 @@ fn launch_codex(app: AppHandle, profile_id: String) -> Result<(), String> {
             fs::create_dir_all(&home_path).map_err(format_io_error)?;
 
             write_user_env(CODEX_HOME_ENV_KEY, path_to_string(&home_path)?)?;
+            if let Some(config_toml) = migrate_home_config_paths(&app, &home_path)? {
+                data.profiles[profile_index].config_toml = Some(config_toml);
+            }
             apply_profile_auth_to_home(&data.profiles[profile_index], &home_path, false)?;
         }
     }
+    if let Some(config_toml) = migrate_home_config_paths(
+        &app,
+        &PathBuf::from(&data.profiles[profile_index].home_path),
+    )? {
+        data.profiles[profile_index].config_toml = Some(config_toml);
+    }
+
     broadcast_environment_change();
 
+    apply_proxy_settings(&data.settings)?;
     launch_codex_app(&data.settings.codex_app_id)?;
 
     let now = Utc::now().to_rfc3339();
@@ -336,12 +480,18 @@ fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
     if settings.codex_app_id.trim().is_empty() {
         return Err("Codex AppID 不能为空。".to_string());
     }
+    validate_proxy_settings(&settings)?;
+    apply_proxy_settings_to_current_process(&settings)?;
 
     let mut data = load_data(&app)?;
     data.settings = AppSettings {
         codex_app_id: settings.codex_app_id.trim().to_string(),
         env_key: CODEX_HOME_ENV_KEY.to_string(),
         delete_open_ai_api_key_before_launch: settings.delete_open_ai_api_key_before_launch,
+        proxy_enabled: settings.proxy_enabled,
+        proxy_protocol: settings.proxy_protocol.trim().to_string(),
+        proxy_host: settings.proxy_host.trim().to_string(),
+        proxy_port: settings.proxy_port.trim().to_string(),
     };
     save_data(&app, &data)
 }
@@ -370,6 +520,11 @@ fn new_profile(
     source_path: Option<&Path>,
     auth_mode: AuthMode,
     api_key: Option<String>,
+    auth_json_path: Option<&Path>,
+    api_provider: Option<String>,
+    api_base_url: Option<String>,
+    api_route_enabled: bool,
+    api_route_model: Option<String>,
     environment_mode: EnvironmentMode,
 ) -> Result<Profile, String> {
     let id = Uuid::new_v4().to_string();
@@ -377,18 +532,32 @@ fn new_profile(
     let home_path = if environment_mode == EnvironmentMode::Sandbox {
         managed_profile_home(app, &id)?
     } else {
-        default_codex_home()?
+        source_path
+            .map(Path::to_path_buf)
+            .unwrap_or(default_codex_home()?)
     };
     let auth_json = if matches!(auth_mode, AuthMode::Account) {
-        let source_path = source_path.ok_or_else(|| "账号登录需要选择导入源目录。".to_string())?;
-        Some(read_auth_json(source_path)?)
+        auth_json_path.map(read_auth_json_file).transpose()?
     } else {
         None
     };
-    let config_toml = match source_path {
-        Some(source_path) => read_config_toml(source_path)?,
-        None => None,
+    let mut config_toml = if environment_mode == EnvironmentMode::Sandbox {
+        match source_path {
+            Some(source_path) => read_config_toml(source_path)?,
+            None => None,
+        }
+    } else {
+        None
     };
+    let api_provider = normalize_optional_string(api_provider);
+    let api_base_url = normalize_optional_string(api_base_url);
+    let api_route_model = normalize_optional_string(api_route_model);
+    if matches!(auth_mode, AuthMode::ApiKey) && api_route_enabled {
+        config_toml = Some(build_api_route_config(
+            api_base_url.as_deref().unwrap_or_default(),
+            api_route_model.as_deref().unwrap_or_default(),
+        ));
+    }
     Ok(Profile {
         id,
         name: name.to_string(),
@@ -396,9 +565,11 @@ fn new_profile(
         import_source_path: source_path.map(path_to_string).transpose()?,
         environment_mode,
         auth_mode,
-        api_key: api_key
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty()),
+        api_key: normalize_optional_string(api_key),
+        api_provider,
+        api_base_url,
+        api_route_enabled,
+        api_route_model,
         auth_json,
         config_toml,
         managed: environment_mode == EnvironmentMode::Sandbox,
@@ -425,9 +596,12 @@ fn default_codex_home() -> Result<PathBuf, String> {
 }
 
 fn read_auth_json(source_path: &Path) -> Result<String, String> {
-    let auth_path = source_path.join("auth.json");
+    read_auth_json_file(&source_path.join("auth.json"))
+}
+
+fn read_auth_json_file(auth_path: &Path) -> Result<String, String> {
     if !auth_path.is_file() {
-        return Err("账号登录 Profile 需要导入源目录中存在 auth.json。".to_string());
+        return Err("账号登录 Profile 需要导入 auth.json 文件。".to_string());
     }
     fs::read_to_string(auth_path).map_err(format_io_error)
 }
@@ -461,7 +635,7 @@ fn apply_profile_to_home(
     codex_home: &Path,
 ) -> Result<(), String> {
     apply_profile_config_to_home(app, profile, codex_home)?;
-    apply_profile_auth_to_home(profile, codex_home, true)
+    apply_profile_auth_to_home(profile, codex_home, false)
 }
 
 fn apply_profile_config_to_home(
@@ -476,9 +650,51 @@ fn apply_profile_config_to_home(
     let Some(config_toml) = config_toml else {
         return Ok(());
     };
+    let config_toml = rewrite_shared_paths_to_home(app, &config_toml, codex_home)?;
 
     fs::create_dir_all(codex_home).map_err(format_io_error)?;
     fs::write(codex_home.join(CODEX_CONFIG_FILENAME), config_toml).map_err(format_io_error)
+}
+
+fn migrate_home_config_paths(app: &AppHandle, codex_home: &Path) -> Result<Option<String>, String> {
+    let config_path = codex_home.join(CODEX_CONFIG_FILENAME);
+    if !config_path.is_file() {
+        return Ok(None);
+    }
+
+    let config_toml = fs::read_to_string(&config_path).map_err(format_io_error)?;
+    let migrated = rewrite_shared_paths_to_home(app, &config_toml, codex_home)?;
+    if migrated != config_toml {
+        fs::write(config_path, &migrated).map_err(format_io_error)?;
+    }
+    Ok(Some(migrated))
+}
+
+fn rewrite_shared_paths_to_home(
+    app: &AppHandle,
+    config_toml: &str,
+    codex_home: &Path,
+) -> Result<String, String> {
+    let shared_root = app_data_dir(app)?.join("shared");
+    rewrite_shared_root_to_home(config_toml, &shared_root, codex_home)
+}
+
+fn rewrite_shared_root_to_home(
+    config_toml: &str,
+    shared_root: &Path,
+    codex_home: &Path,
+) -> Result<String, String> {
+    let shared_root = path_to_string(shared_root)?;
+    let codex_home = path_to_string(codex_home)?;
+
+    let mut migrated = config_toml.replace(&shared_root, &codex_home);
+    let shared_root_forward = shared_root.replace('\\', "/");
+    if shared_root_forward != shared_root {
+        let codex_home_forward = codex_home.replace('\\', "/");
+        migrated = migrated.replace(&shared_root_forward, &codex_home_forward);
+    }
+
+    Ok(migrated)
 }
 
 fn apply_profile_auth_to_home(
@@ -524,6 +740,226 @@ fn validate_auth(auth_mode: &AuthMode, api_key: Option<&str>) -> Result<(), Stri
         return Err("API Key 登录方式需要填写 OPENAI_API_KEY。".to_string());
     }
     Ok(())
+}
+
+fn test_connection_for_profile(profile: &Profile) -> Result<ConnectionTestResult, String> {
+    match profile.auth_mode {
+        AuthMode::ApiKey => {
+            let api_key = profile
+                .api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "此 Profile 没有保存 API Key。".to_string())?;
+            let endpoint = models_endpoint(profile.api_base_url.as_deref());
+            test_http_bearer(&endpoint, api_key)
+        }
+        AuthMode::Account => {
+            let auth_json = match profile.auth_json.as_deref() {
+                Some(auth_json) => auth_json.to_string(),
+                None => read_auth_json_file(&Path::new(&profile.home_path).join("auth.json"))?,
+            };
+            validate_auth_json_content(&auth_json)?;
+            Ok(ConnectionTestResult {
+                ok: true,
+                status: "auth.json 可读取".to_string(),
+                endpoint: "local auth.json".to_string(),
+            })
+        }
+    }
+}
+
+fn models_endpoint(api_base_url: Option<&str>) -> String {
+    let base_url = api_base_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("https://api.openai.com/v1")
+        .trim_end_matches('/');
+    if base_url.ends_with("/models") {
+        base_url.to_string()
+    } else {
+        format!("{base_url}/models")
+    }
+}
+
+fn read_account_test_auth_json(
+    auth_json_path: Option<&str>,
+    source_path: Option<&str>,
+) -> Result<String, String> {
+    if let Some(path) = auth_json_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return read_auth_json_file(Path::new(path));
+    }
+    if let Some(path) = source_path.map(str::trim).filter(|value| !value.is_empty()) {
+        return read_auth_json(Path::new(path));
+    }
+    read_auth_json(&default_codex_home()?)
+}
+
+fn validate_auth_json_content(auth_json: &str) -> Result<(), String> {
+    serde_json::from_str::<serde_json::Value>(auth_json)
+        .map(|_| ())
+        .map_err(|error| format!("auth.json 解析失败：{error}"))
+}
+
+fn test_http_bearer(endpoint: &str, bearer: &str) -> Result<ConnectionTestResult, String> {
+    let script = format!(
+        r#"$ErrorActionPreference = 'Stop'
+$headers = @{{ Authorization = 'Bearer {bearer}' }}
+try {{
+  $response = Invoke-WebRequest -Uri '{endpoint}' -Headers $headers -Method Get -TimeoutSec 20 -UseBasicParsing
+  Write-Output ("OK|" + [int]$response.StatusCode)
+}} catch {{
+  if ($_.Exception.Response) {{
+    Write-Output ("ERR|" + [int]$_.Exception.Response.StatusCode)
+  }} else {{
+    Write-Output ("ERR|" + $_.Exception.Message)
+  }}
+}}
+"#,
+        bearer = escape_powershell_single_quote(bearer),
+        endpoint = escape_powershell_single_quote(endpoint)
+    );
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-Command", &script])
+        .output()
+        .map_err(format_io_error)?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let mut parts = stdout.splitn(2, '|');
+    let kind = parts.next().unwrap_or_default();
+    let status = parts.next().unwrap_or_default().to_string();
+    Ok(ConnectionTestResult {
+        ok: kind == "OK",
+        status: if status.is_empty() { stdout } else { status },
+        endpoint: endpoint.to_string(),
+    })
+}
+
+fn escape_powershell_single_quote(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+fn validate_api_route(
+    auth_mode: &AuthMode,
+    route_enabled: bool,
+    api_base_url: Option<&str>,
+    api_route_model: Option<&str>,
+) -> Result<(), String> {
+    if !route_enabled {
+        return Ok(());
+    }
+    if !matches!(auth_mode, AuthMode::ApiKey) {
+        return Err("第三方 API 路由只支持 API Key 登录方式。".to_string());
+    }
+    if api_base_url.map(str::trim).unwrap_or_default().is_empty() {
+        return Err("启用第三方 API 路由需要填写 Base URL。".to_string());
+    }
+    if api_route_model
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Err("启用第三方 API 路由需要填写模型名。".to_string());
+    }
+    Ok(())
+}
+
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn default_proxy_protocol() -> String {
+    "http".to_string()
+}
+
+fn validate_proxy_settings(settings: &AppSettings) -> Result<(), String> {
+    if !settings.proxy_enabled {
+        return Ok(());
+    }
+    let protocol = settings.proxy_protocol.trim();
+    if protocol != "http" && protocol != "socks5" {
+        return Err("代理协议只支持 http 或 socks5。".to_string());
+    }
+    if settings.proxy_host.trim().is_empty() {
+        return Err("启用代理需要填写主机。".to_string());
+    }
+    let port_number = settings
+        .proxy_port
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| "代理端口必须是 1-65535 的数字。".to_string())?;
+    if port_number == 0 {
+        return Err("代理端口必须是 1-65535 的数字。".to_string());
+    }
+    Ok(())
+}
+
+fn proxy_url(settings: &AppSettings) -> Result<String, String> {
+    validate_proxy_settings(settings)?;
+    Ok(format!(
+        "{}://{}:{}",
+        settings.proxy_protocol.trim(),
+        settings.proxy_host.trim(),
+        settings.proxy_port.trim()
+    ))
+}
+
+fn apply_proxy_settings_to_current_process(settings: &AppSettings) -> Result<(), String> {
+    if settings.proxy_enabled {
+        let proxy_url = proxy_url(settings)?;
+        unsafe {
+            env::set_var(HTTP_PROXY_ENV_KEY, &proxy_url);
+            env::set_var(HTTPS_PROXY_ENV_KEY, &proxy_url);
+            env::set_var(ALL_PROXY_ENV_KEY, &proxy_url);
+        }
+    } else {
+        unsafe {
+            env::remove_var(HTTP_PROXY_ENV_KEY);
+            env::remove_var(HTTPS_PROXY_ENV_KEY);
+            env::remove_var(ALL_PROXY_ENV_KEY);
+        }
+    }
+    Ok(())
+}
+
+fn apply_proxy_settings(settings: &AppSettings) -> Result<(), String> {
+    apply_proxy_settings_to_current_process(settings)?;
+    if settings.proxy_enabled {
+        let proxy_url = proxy_url(settings)?;
+        write_user_env(HTTP_PROXY_ENV_KEY, proxy_url.clone())?;
+        write_user_env(HTTPS_PROXY_ENV_KEY, proxy_url.clone())?;
+        write_user_env(ALL_PROXY_ENV_KEY, proxy_url)?;
+    } else {
+        delete_user_env(HTTP_PROXY_ENV_KEY)?;
+        delete_user_env(HTTPS_PROXY_ENV_KEY)?;
+        delete_user_env(ALL_PROXY_ENV_KEY)?;
+    }
+    broadcast_environment_change();
+    Ok(())
+}
+
+fn build_api_route_config(api_base_url: &str, model: &str) -> String {
+    format!(
+        r#"model_provider = "third_party"
+model = "{}"
+
+[model_providers.third_party]
+name = "Third-party OpenAI-compatible"
+base_url = "{}"
+env_key = "OPENAI_API_KEY"
+wire_api = "responses"
+"#,
+        escape_toml_string(model.trim()),
+        escape_toml_string(api_base_url.trim())
+    )
+}
+
+fn escape_toml_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn normalize_optional_home_path(home_path: &str) -> Result<Option<PathBuf>, String> {
@@ -698,6 +1134,44 @@ fn format_io_error(error: io::Error) -> String {
     error.to_string()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rewrites_legacy_shared_paths_to_current_home() {
+        let config = "model_instructions_file = 'C:\\Users\\frank\\AppData\\Roaming\\com.frank.codex-switch-helper\\shared\\prompts\\AGENTS.md'\npath = 'C:\\Users\\frank\\AppData\\Roaming\\com.frank.codex-switch-helper\\shared\\skills\\hunt'";
+        let shared_root =
+            Path::new(r"C:\Users\frank\AppData\Roaming\com.frank.codex-switch-helper\shared");
+        let codex_home = Path::new(
+            r"C:\Users\frank\AppData\Roaming\com.frank.codex-switch-helper\profiles\p1\home",
+        );
+
+        let migrated = rewrite_shared_root_to_home(config, shared_root, codex_home).unwrap();
+
+        assert!(!migrated.contains(r"com.frank.codex-switch-helper\shared"));
+        assert!(migrated.contains(r"profiles\p1\home\prompts\AGENTS.md"));
+        assert!(migrated.contains(r"profiles\p1\home\skills\hunt"));
+    }
+
+    #[test]
+    fn rewrites_forward_slash_legacy_shared_paths_to_current_home() {
+        let config = "path = 'C:/Users/frank/AppData/Roaming/com.frank.codex-switch-helper/shared/skills/hunt'";
+        let shared_root =
+            Path::new(r"C:\Users\frank\AppData\Roaming\com.frank.codex-switch-helper\shared");
+        let codex_home = Path::new(
+            r"C:\Users\frank\AppData\Roaming\com.frank.codex-switch-helper\profiles\p1\home",
+        );
+
+        let migrated = rewrite_shared_root_to_home(config, shared_root, codex_home).unwrap();
+
+        assert_eq!(
+            migrated,
+            "path = 'C:/Users/frank/AppData/Roaming/com.frank.codex-switch-helper/profiles/p1/home/skills/hunt'"
+        );
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -712,6 +1186,8 @@ fn main() {
             launch_default_codex,
             clear_codex_home,
             inspect_profile,
+            test_profile_connection,
+            test_login_connection,
             launch_codex,
             reveal_profile_folder,
             save_settings,

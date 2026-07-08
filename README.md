@@ -13,6 +13,8 @@ Tauri desktop helper for switching Codex App profiles on Windows.
 - Manages multiple Codex Profiles with separate saved auth data.
 - Supports two environment modes: shared environment and sandbox mode.
 - Supports account-login Profiles and API-key Profiles.
+- Supports HTTP and SOCKS5 proxy settings for the helper app and Codex launches.
+- Provides protective confirmation dialogs for dangerous actions such as deleting Profiles or changing user-level environment variables.
 - Launches the Windows Codex App through `shell:AppsFolder`.
 - Can restore default Codex Home behavior by deleting user-level `CODEX_HOME`.
 - Checks for app updates through signed Tauri updater artifacts published on GitHub Releases.
@@ -51,6 +53,16 @@ Use sandbox mode when you want a Profile to keep fully isolated Codex Home state
 - `默认启动 Codex` launches Codex without changing `CODEX_HOME` or `OPENAI_API_KEY`.
 - `恢复默认 Home` deletes user-level `CODEX_HOME`, so manual Codex launches fall back to the default home, usually `C:\Users\frank\.codex`.
 
+## Settings And Proxy
+
+The settings page contains Codex launch settings and proxy settings.
+
+- Proxy supports `http` and `socks5`.
+- Saving proxy settings applies them to this helper app immediately.
+- Launching Codex with proxy enabled writes user-level `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY`.
+- Launching Codex with proxy disabled clears the proxy environment variables managed by this app.
+- Dangerous operations use in-app confirmation dialogs. Deleting a Profile requires typing the Profile name.
+
 ## Testing With Alternate Data
 
 Set `CODEX_SWITCH_HELPER_DATA_FILE` to test against another data file without touching the real `data.json`:
@@ -85,7 +97,7 @@ On Windows, Rust/Tauri requires the Visual Studio Build Tools C++ toolchain. If 
 
 ## App Updates
 
-The app checks GitHub Releases for signed updater metadata at startup and also provides a manual update check in the settings panel.
+The app checks GitHub Releases for signed updater metadata at startup and also provides a manual update check in the About panel.
 
 Before publishing updater-enabled releases, add these repository secrets:
 
@@ -108,3 +120,5 @@ npm run tauri:build
 ```
 
 Also update `CHANGELOG.md`, `README.md`, and `README.zh-CN.md` before tagging a release.
+
+Current release: `0.1.5`.

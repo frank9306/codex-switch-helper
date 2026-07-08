@@ -1,12 +1,22 @@
 # Changelog
 
+## 0.1.5 - 2026-07-08
+
+- Added a dedicated settings page for proxy and Codex launch settings.
+- Added HTTP and SOCKS5 proxy support for the app process and Codex launches.
+- Added protective in-app confirmation dialogs for dangerous actions, including typed confirmation before deleting Profiles.
+- Added the project GitHub repository link to the About page.
+- Replaced the README product screenshot with the current dashboard screenshot.
+- Added `DESIGN.md` to document the app's visual system.
+
 ## 0.1.4 - 2026-07-07
 
 - Added signed Tauri updater support backed by GitHub Releases.
 - Added startup and manual update checks in the app UI.
 - Updated the release workflow to publish updater-compatible artifacts and metadata.
 - Redesigned the app UI as a light dashboard with summary cards and a left navigation rail.
-- Added the Tauri process plugin required to relaunch after installing updates.`r`n- Regenerated the npm lockfile with npm 10 compatibility so release CI can run `npm ci`.
+- Added the Tauri process plugin required to relaunch after installing updates.
+- Regenerated the npm lockfile with npm 10 compatibility so release CI can run `npm ci`.
 
 ## 0.1.3 - 2026-07-07
 

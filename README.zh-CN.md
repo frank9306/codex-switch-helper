@@ -13,6 +13,8 @@
 - 管理多个 Codex Profile，并为每个 Profile 保存独立登录数据。
 - 支持两种环境模式：共享环境和沙盒模式。
 - 支持账号登录 Profile 和 API Key 登录 Profile。
+- 支持为本工具和 Codex 启动配置 HTTP / SOCKS5 代理。
+- 删除 Profile、修改用户级环境变量等危险操作会显示保护性确认弹窗。
 - 通过 `shell:AppsFolder` 启动 Windows Codex App。
 - 可以删除用户级 `CODEX_HOME`，恢复 Codex 默认 Home 行为。
 - 通过发布到 GitHub Releases 的 Tauri 签名更新产物检查和安装应用更新。
@@ -51,6 +53,16 @@
 - `默认启动 Codex` 不修改 `CODEX_HOME` 或 `OPENAI_API_KEY`，只启动 Codex。
 - `恢复默认 Home` 删除用户级 `CODEX_HOME`，让手动启动 Codex 回到默认 Home，通常是 `C:\Users\frank\.codex`。
 
+## 设置和代理
+
+设置页面包含 Codex 启动设置和代理设置。
+
+- 代理支持 `http` 和 `socks5`。
+- 保存代理后，本工具会立即使用该代理。
+- 启用代理后启动 Codex，会写入用户级 `HTTP_PROXY`、`HTTPS_PROXY` 和 `ALL_PROXY`。
+- 关闭代理后启动 Codex，会清理由本工具管理的代理环境变量。
+- 危险操作使用应用内确认弹窗。删除 Profile 时必须输入 Profile 名称。
+
 ## 使用测试数据
 
 设置 `CODEX_SWITCH_HELPER_DATA_FILE` 可以让应用读取另一个数据文件，不污染真实 `data.json`：
@@ -85,7 +97,7 @@ Windows 上 Tauri/Rust 需要 Visual Studio Build Tools C++ 工具链。如果 `
 
 ## 应用更新
 
-应用启动时会检查 GitHub Releases 上的签名更新元数据，也可以在设置面板手动检查更新。
+应用启动时会检查 GitHub Releases 上的签名更新元数据，也可以在关于面板手动检查更新。
 
 发布支持自动更新的版本前，需要添加这些 GitHub 仓库 secrets：
 
@@ -108,3 +120,5 @@ npm run tauri:build
 ```
 
 发布前必须更新 `CHANGELOG.md`、`README.md` 和 `README.zh-CN.md`。
+
+当前版本：`0.1.5`。
