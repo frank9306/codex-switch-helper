@@ -6,7 +6,7 @@
 - Added startup and manual update checks in the app UI.
 - Updated the release workflow to publish updater-compatible artifacts and metadata.
 - Redesigned the app UI as a light dashboard with summary cards and a left navigation rail.
-- Added the Tauri process plugin required to relaunch after installing updates.
+- Added the Tauri process plugin required to relaunch after installing updates.`r`n- Regenerated the npm lockfile with npm 10 compatibility so release CI can run `npm ci`.
 
 ## 0.1.3 - 2026-07-07
 
