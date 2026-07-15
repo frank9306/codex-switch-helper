@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1 - 2026-07-15
+
+- Fixed Profile launches by resolving the packaged Codex desktop entry point from its AppX manifest.
+- Passed each dedicated `--user-data-dir` as a Chromium switch value so Profile instances keep isolated app data and can run concurrently.
+
 ## 0.2.0 - 2026-07-15
 
 - Isolated every Profile in a tool-managed Codex Home with process-local credentials and proxy settings.

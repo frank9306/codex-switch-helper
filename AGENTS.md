@@ -37,6 +37,7 @@
 
 ## Release Checklist
 
+- When asked to release, increment the patch version by one automatically without asking for a version number.
 - Before any release or publish, generate/update `CHANGELOG.md`.
 - Before any release or publish, update `README.md` and `README.zh-CN.md` for changed usage, setup, and release notes.
 - Verify before release: `npm run build`, `cargo fmt --check`, and `cargo check`.

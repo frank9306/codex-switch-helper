@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::{
-    env, fs, io,
+    env,
+    ffi::OsString,
+    fs, io,
     path::{Path, PathBuf},
     process::Command,
     sync::{Mutex, OnceLock},
@@ -29,6 +31,23 @@ const CODEX_PROCESS_NAME: &str = "Codex.exe";
 const CODEX_CONFIG_FILENAME: &str = "config.toml";
 const SHARED_AGENTS_FILENAME: &str = "AGENTS.md";
 const ENVIRONMENT_BROADCAST_TIMEOUT_MS: u32 = 500;
+const DETECT_CODEX_EXECUTABLE_SCRIPT: &str = r#"
+$packages = Get-AppxPackage | Where-Object { $_.Name -like 'OpenAI.Codex*' -or $_.PackageFamilyName -like 'OpenAI.Codex_*' }
+foreach ($package in $packages) {
+  $manifest = $package | Get-AppxPackageManifest
+  $application = $manifest.Package.Applications.Application | Where-Object { $_.Id -eq 'App' } | Select-Object -First 1
+  if (-not $application) {
+    $application = $manifest.Package.Applications.Application | Select-Object -First 1
+  }
+  $relativePath = [string]$application.Executable
+  if (-not [string]::IsNullOrWhiteSpace($relativePath)) {
+    $candidate = Join-Path $package.InstallLocation $relativePath
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) { $candidate; exit }
+  }
+}
+$command = Get-Command ChatGPT.exe -ErrorAction SilentlyContinue
+if ($command) { $command.Source }
+"#;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -469,13 +488,12 @@ fn launch_codex(app: AppHandle, profile_id: String) -> Result<CodexInstance, Str
     }
 
     let executable = detect_codex_executable()?
-        .ok_or_else(|| "未找到 Codex.exe，无法使用独立环境启动多开实例。".to_string())?;
+        .ok_or_else(|| "未找到 Codex 桌面应用入口，无法启动独立实例。".to_string())?;
     let app_user_data = app_data_dir(&app)?.join("codex-app-data").join(&profile_id);
     fs::create_dir_all(&app_user_data).map_err(format_io_error)?;
     let mut command = hidden_command(executable.to_string_lossy().as_ref());
     command
-        .arg("--user-data-dir")
-        .arg(&app_user_data)
+        .arg(user_data_dir_arg(&app_user_data))
         .env(CODEX_HOME_ENV_KEY, &home_path);
     apply_profile_process_env(&mut command, &data.profiles[profile_index])?;
     apply_proxy_process_env(&mut command, &data.settings)?;
@@ -591,17 +609,8 @@ fn launch_codex_app(app_id: &str) -> Result<(), String> {
 }
 
 fn detect_codex_executable() -> Result<Option<PathBuf>, String> {
-    let script = r#"
-$packages = Get-AppxPackage | Where-Object { $_.Name -like 'OpenAI.Codex*' -or $_.PackageFamilyName -like 'OpenAI.Codex_*' }
-foreach ($package in $packages) {
-  $candidate = Get-ChildItem -LiteralPath $package.InstallLocation -Filter Codex.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
-  if ($candidate) { $candidate; exit }
-}
-$command = Get-Command Codex.exe -ErrorAction SilentlyContinue
-if ($command) { $command.Source }
-"#;
     let output = hidden_command("powershell.exe")
-        .args(["-NoProfile", "-Command", script])
+        .args(["-NoProfile", "-Command", DETECT_CODEX_EXECUTABLE_SCRIPT])
         .output()
         .map_err(format_io_error)?;
     if !output.status.success() {
@@ -613,6 +622,12 @@ if ($command) { $command.Source }
     } else {
         Ok(Some(PathBuf::from(path)))
     }
+}
+
+fn user_data_dir_arg(path: &Path) -> OsString {
+    let mut arg = OsString::from("--user-data-dir=");
+    arg.push(path.as_os_str());
+    arg
 }
 
 #[tauri::command]
@@ -1470,6 +1485,23 @@ mod usage_scanner_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_executable_detection_uses_the_appx_manifest_entrypoint() {
+        assert!(DETECT_CODEX_EXECUTABLE_SCRIPT.contains("Get-AppxPackageManifest"));
+        assert!(DETECT_CODEX_EXECUTABLE_SCRIPT.contains("$application.Executable"));
+        assert!(!DETECT_CODEX_EXECUTABLE_SCRIPT.contains("-Filter Codex.exe -Recurse"));
+    }
+
+    #[test]
+    fn user_data_directory_is_passed_as_a_chromium_switch_value() {
+        let path = Path::new(r"C:\Users\tester\App Data\profile-1");
+
+        assert_eq!(
+            user_data_dir_arg(path),
+            OsString::from(r"--user-data-dir=C:\Users\tester\App Data\profile-1")
+        );
+    }
 
     #[test]
     fn rewrites_legacy_shared_paths_to_current_home() {
