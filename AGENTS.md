@@ -3,28 +3,21 @@
 ## Project Shape
 
 - This is a Windows-focused Tauri v2 desktop app: React/Vite frontend in `src/`, Rust backend in `src-tauri/src/main.rs`.
-- The app manages Codex Profiles with two environment modes: shared environment and sandbox mode.
-- Shared environment Profiles reuse one Codex Home path and switch saved auth/config data into that Home before launch.
-- Sandbox Profiles copy a selected source Codex Home into a tool-owned directory: `app_data/profiles/<profileId>/home`.
-- New sandbox Profiles must not directly reference the user-selected source directory; import means copy source to the generated managed home.
-- Deleting a sandbox Profile deletes only the tool-owned managed home, never the original import source.
+- Every Codex Profile uses a tool-owned directory: `app_data/profiles/<profileId>/home`.
+- New Profiles copy the default Codex Home into the generated managed Home.
+- Legacy shared Profiles migrate by copying their old Home into a managed Home; never delete the original source.
+- Deleting a Profile deletes only its tool-owned managed Home.
 
 ## Codex Environment Rules
 
-- Shared Profile launch writes user-level `HKCU\Environment\CODEX_HOME` to the shared Home path, writes the Profile's saved `config.toml`, then applies its auth data before launching Codex.
-- Sandbox Profile launch writes user-level `HKCU\Environment\CODEX_HOME` to the Profile managed home, then launches Codex.
-- Account-login Profiles clear user-level `OPENAI_API_KEY` and write saved `auth.json` into the target Home before launch.
-- API-key Profiles write user-level `OPENAI_API_KEY` from the Profile's saved key and remove stale `auth.json` from the target Home before launch. Keys are currently stored in local JSON without encryption.
+- Profile launch passes `CODEX_HOME`, credentials, and proxy settings only to the launched process.
+- Each Profile uses a dedicated Codex `--user-data-dir` so multiple instances can run concurrently.
+- Account-login Profiles write saved `auth.json` into the target Home.
+- API-key Profiles pass `OPENAI_API_KEY` to the launched process and remove stale `auth.json` from the target Home. Keys are currently stored in local JSON without encryption.
 - `默认启动 Codex` must not modify `CODEX_HOME` or `OPENAI_API_KEY`.
 - `恢复默认 Home` only deletes user-level `CODEX_HOME`; this lets manual Codex launches fall back to the default home, usually `C:\Users\frank\.codex`.
 - Codex AppID auto-detection must prefer `OpenAI.Codex_*`; do not use broad `*Codex*` first because it can pick unrelated apps like `BFCodexHelp`.
 
-## Shared Environment Rules
-
-- The Shared Library feature has been removed. Do not reintroduce `sharedAssets`, shared skills/prompts/MCP/session toggles, or `app_data/shared/` behavior unless explicitly requested.
-- Shared environment mode is not full isolation: sessions, caches, browser data, tools, and other Home state are intentionally shared by the selected shared Home path.
-- Shared mode must switch the minimum Profile-specific state needed for identity and model behavior: `auth.json` or `OPENAI_API_KEY`, plus `config.toml`.
-- `CODEX_SWITCH_HELPER_DATA_FILE` may point the app at an alternate JSON data file for testing without touching the real `data.json`.
 
 ## Commands
 

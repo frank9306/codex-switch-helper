@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { getVersion } from '@tauri-apps/api/app'
 import { createRoot } from 'react-dom/client'
 import { invoke } from '@tauri-apps/api/core'
@@ -9,9 +9,8 @@ import './style.css'
 
 type AuthMode = 'account' | 'apiKey'
 type ApiProvider = 'openai' | 'minimax' | 'deepseek' | 'custom'
-type EnvironmentMode = 'shared' | 'sandbox'
 type Mode = 'detail' | 'new' | 'edit'
-type ActiveMenu = 'profiles' | 'settings' | 'about'
+type ActiveMenu = 'profiles' | 'resources' | 'usage' | 'settings' | 'about'
 type ProxyProtocol = 'http' | 'socks5'
 
 type ConfirmIntent = 'danger' | 'warning'
@@ -62,8 +61,6 @@ type Profile = {
   id: string
   name: string
   homePath: string
-  importSourcePath?: string
-  environmentMode: EnvironmentMode
   authMode: AuthMode
   apiKey?: string
   apiProvider?: ApiProvider
@@ -93,17 +90,75 @@ type AppState = {
   currentCodexHome?: string
 }
 
-type ProfileInspection = {
-  exists: boolean
-  hasAuthJson: boolean
-  hasConfigToml: boolean
-  fileCount: number
-}
-
 type ConnectionTestResult = {
   ok: boolean
   status: string
   endpoint: string
+}
+
+type UsageProfileSummary = {
+  homePath: string
+  profileId?: string | null
+  profileName?: string | null
+  callCount: number
+  inputTokens: number
+  outputTokens: number
+  reasoningOutputTokens: number
+  totalTokens: number
+  lastUsedAt?: number | null
+  currentPlanType?: string | null
+  currentUsedPercent?: number | null
+  currentResetsAt?: number | null
+}
+
+type UsageSummary = {
+  totalCalls: number
+  totalTokens: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalReasoningTokens: number
+  firstRecordedAt?: number | null
+  lastRecordedAt?: number | null
+  activeSessions: number
+  byProfile: UsageProfileSummary[]
+}
+
+type UsageSessionInfo = {
+  sessionId: string
+  homePath: string
+  profileId?: string | null
+  profileName?: string | null
+  cwd?: string | null
+  firstRecordedAt: number
+  lastRecordedAt: number
+  callCount: number
+  totalTokens: number
+}
+
+type SharedResources = {
+  agentsPath: string
+  agentsContent: string
+  skillsPath: string
+  skills: Array<{ name: string; path: string; description?: string | null }>
+}
+
+type CodexInstance = {
+  profileId: string
+  profileName: string
+  pid: number
+  startedAt: string
+}
+
+function formatNumber(value?: number | null) {
+  return typeof value === 'number' ? value.toLocaleString() : '无'
+}
+
+function formatTime(value?: number | null) {
+  return typeof value === 'number' ? new Date(value * 1000).toLocaleString() : '无'
+}
+
+function formatPercent(value?: number | null) {
+  return typeof value === 'number' ? `${Math.round(value)}%` : '无'
 }
 
 function App() {
@@ -112,9 +167,7 @@ function App() {
   const [mode, setMode] = useState<Mode>('detail')
   const [activeMenu, setActiveMenu] = useState<ActiveMenu>('profiles')
   const [formName, setFormName] = useState('')
-  const [formSourcePath, setFormSourcePath] = useState('')
   const [formAuthJsonPath, setFormAuthJsonPath] = useState('')
-  const [formEnvironmentMode, setFormEnvironmentMode] = useState<EnvironmentMode>('shared')
   const [formAuthMode, setFormAuthMode] = useState<AuthMode>('account')
   const [formApiKey, setFormApiKey] = useState('')
   const [formApiProvider, setFormApiProvider] = useState<ApiProvider>('openai')
@@ -127,15 +180,21 @@ function App() {
   const [proxyHost, setProxyHost] = useState('')
   const [proxyPort, setProxyPort] = useState('')
   const [detectedCodexAppId, setDetectedCodexAppId] = useState<string | null>(null)
-  const [inspection, setInspection] = useState<ProfileInspection | null>(null)
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
   const [appVersion, setAppVersion] = useState('')
   const [updateBusy, setUpdateBusy] = useState(false)
   const [updateProgress, setUpdateProgress] = useState('')
+  const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null)
+  const [usageSessions, setUsageSessions] = useState<UsageSessionInfo[]>([])
+  const [usageBusy, setUsageBusy] = useState(false)
+  const [resources, setResources] = useState<SharedResources | null>(null)
+  const [agentsDraft, setAgentsDraft] = useState('')
+  const [instances, setInstances] = useState<CodexInstance[]>([])
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null)
+  const codexAppIdDetectionStarted = useRef(false)
 
-  async function loadState() {
+  async function loadState(): Promise<AppState> {
     const nextState = await invoke<AppState>('get_app_state')
     setState(nextState)
     setCodexAppId(nextState.settings.codexAppId)
@@ -144,6 +203,7 @@ function App() {
     setProxyHost(nextState.settings.proxyHost || '')
     setProxyPort(nextState.settings.proxyPort || '')
     setSelectedProfileId((current) => current || nextState.activeProfileId || nextState.profiles[0]?.id || '')
+    return nextState
   }
 
   async function checkForUpdate(silent = false) {
@@ -217,24 +277,38 @@ function App() {
 
   useEffect(() => {
     loadState()
-      .then(async () => {
+      .then(() => {
         getVersion().then(setAppVersion).catch(() => setAppVersion(''))
-        const nextState = await invoke<AppState>('get_app_state')
-        await detectAndSaveCodexAppId(nextState.settings)
-        await checkForUpdate(true)
+        checkForUpdate(true)
       })
       .catch((error) => setMessage(String(error)))
   }, [])
 
   useEffect(() => {
-    if (!selectedProfileId || mode !== 'detail') {
-      setInspection(null)
-      return
-    }
-    invoke<ProfileInspection>('inspect_profile', { profileId: selectedProfileId })
-      .then(setInspection)
+    if (activeMenu !== 'settings' || !state || codexAppIdDetectionStarted.current) return
+    codexAppIdDetectionStarted.current = true
+    detectAndSaveCodexAppId(state.settings).catch((error) => setMessage(String(error)))
+  }, [activeMenu, state])
+
+  useEffect(() => {
+    if (activeMenu !== 'usage' || usageSummary) return
+    refreshUsage(false)
+  }, [activeMenu, usageSummary])
+
+  useEffect(() => {
+    if (activeMenu !== 'resources' || resources) return
+    invoke<SharedResources>('get_shared_resources')
+      .then((value) => {
+        setResources(value)
+        setAgentsDraft(value.agentsContent)
+      })
       .catch((error) => setMessage(String(error)))
-  }, [selectedProfileId, mode])
+  }, [activeMenu, resources])
+
+  useEffect(() => {
+    if (activeMenu !== 'profiles') return
+    invoke<CodexInstance[]>('list_codex_instances').then(setInstances).catch(() => setInstances([]))
+  }, [activeMenu])
 
   const selectedProfile = state?.profiles.find((profile) => profile.id === selectedProfileId)
 
@@ -251,9 +325,7 @@ function App() {
     setActiveMenu('profiles')
     setMode('new')
     setFormName('')
-    setFormSourcePath('')
     setFormAuthJsonPath('')
-    setFormEnvironmentMode('shared')
     setFormAuthMode('account')
     setFormApiKey('')
     applyApiProviderPreset('openai')
@@ -264,9 +336,7 @@ function App() {
     setActiveMenu('profiles')
     setMode('edit')
     setFormName(profile.name)
-    setFormSourcePath(profile.importSourcePath || '')
     setFormAuthJsonPath('')
-    setFormEnvironmentMode(profile.environmentMode || 'sandbox')
     setFormAuthMode(profile.authMode || 'account')
     setFormApiKey(profile.apiKey || '')
     setFormApiProvider(profile.apiProvider || 'custom')
@@ -294,22 +364,6 @@ function App() {
       })
       if (typeof selected === 'string') {
         setFormAuthJsonPath(selected)
-      }
-    } catch (error) {
-      setMessage(String(error))
-    }
-  }
-
-  async function chooseSourceDirectory() {
-    setMessage('')
-    try {
-      const selected = await open({
-        directory: true,
-        multiple: false,
-        title: '选择 Codex Home 目录',
-      })
-      if (typeof selected === 'string') {
-        setFormSourcePath(selected)
       }
     } catch (error) {
       setMessage(String(error))
@@ -346,7 +400,7 @@ function App() {
       if (mode === 'new') {
         const profile = await invoke<Profile>('create_profile', {
           name: formName,
-          sourcePath: formSourcePath,
+          sourcePath: '',
           authMode: formAuthMode,
           apiKey: formAuthMode === 'apiKey' ? formApiKey : null,
           authJsonPath: formAuthMode === 'account' ? formAuthJsonPath : null,
@@ -354,7 +408,6 @@ function App() {
           apiBaseUrl: formAuthMode === 'apiKey' ? formApiBaseUrl : null,
           apiRouteEnabled: formAuthMode === 'apiKey' ? formApiRouteEnabled : false,
           apiRouteModel: formAuthMode === 'apiKey' ? formApiRouteModel : null,
-          environmentMode: formEnvironmentMode,
         })
         setSelectedProfileId(profile.id)
         setMode('detail')
@@ -393,7 +446,7 @@ function App() {
         authMode: formAuthMode,
         apiKey: formAuthMode === 'apiKey' ? formApiKey : null,
         authJsonPath: formAuthMode === 'account' ? formAuthJsonPath : null,
-        sourcePath: formSourcePath,
+        sourcePath: '',
         apiBaseUrl: formAuthMode === 'apiKey' ? formApiBaseUrl : null,
       })
       return result.ok ? `连通测试通过：${result.endpoint}` : `连通测试失败：HTTP ${result.status}，${result.endpoint}`
@@ -404,18 +457,15 @@ function App() {
     const profile = state?.profiles.find((item) => item.id === profileId)
     requestConfirm({
       title: `启动 Profile：${profile?.name || '未知'}`,
-      body: '此操作会修改当前用户环境并启动 Codex。',
+      body: '此操作会用当前 Profile 的独立环境启动 Codex。',
       confirmLabel: '确认启动',
       intent: 'warning',
-      details: proxyEnabled
-        ? ['写入 CODEX_HOME', '切换登录状态或 OPENAI_API_KEY', '写入代理环境变量']
-        : ['写入 CODEX_HOME', '切换登录状态或 OPENAI_API_KEY', '清理本工具管理的代理环境变量'],
+      details: ['使用独立 CODEX_HOME', '使用独立应用数据目录', proxyEnabled ? '为此实例应用代理' : '此实例不使用代理'],
       onConfirm: async () => {
         await runAction(async () => {
-          await invoke('launch_codex', { profileId })
-          return profile?.environmentMode === 'shared'
-            ? '已写回此 Profile 的登录数据和配置，并使用共享 Home 启动 Codex。'
-            : '已按当前 Profile 设置 CODEX_HOME 和 OPENAI_API_KEY，并启动 Codex。'
+          await invoke<CodexInstance>('launch_codex', { profileId })
+          setInstances(await invoke<CodexInstance[]>('list_codex_instances'))
+          return '已启动独立 Codex 实例。'
         })
       },
     })
@@ -427,13 +477,11 @@ function App() {
       body: '此操作不会修改 CODEX_HOME 或 OPENAI_API_KEY，但会同步当前代理设置。',
       confirmLabel: '确认启动',
       intent: 'warning',
-      details: proxyEnabled ? ['写入代理环境变量', '启动 Codex'] : ['清理本工具管理的代理环境变量', '启动 Codex'],
+      details: ['清理本工具旧版写入的代理环境变量', '启动 Codex'],
       onConfirm: async () => {
         await runAction(async () => {
           await invoke('launch_default_codex')
-          return proxyEnabled
-            ? '已按当前系统环境默认启动 Codex，并应用代理设置；未修改 CODEX_HOME 或 OPENAI_API_KEY。'
-            : '已按当前系统环境默认启动 Codex，并清理本工具管理的代理环境变量；未修改 CODEX_HOME 或 OPENAI_API_KEY。'
+          return '已按当前系统环境默认启动 Codex；本程序代理不会应用到 Codex。'
         })
       },
     })
@@ -463,8 +511,8 @@ function App() {
       confirmLabel: '保存设置',
       intent: 'warning',
       details: proxyEnabled
-        ? [`本程序立即使用代理：${proxyProtocol}://${proxyHost}:${proxyPort}`, '后续启动 Codex 时同步代理环境变量']
-        : ['本程序立即停止使用代理', '后续启动 Codex 时清理本工具管理的代理环境变量'],
+        ? [`本程序立即使用代理：${proxyProtocol}://${proxyHost}:${proxyPort}`, '后续 Codex 实例使用此代理']
+        : ['本程序立即停止使用代理', '后续 Codex 实例不注入代理'],
       onConfirm: async () => {
         await runAction(async () => {
           await invoke('save_settings', {
@@ -490,6 +538,41 @@ function App() {
     })
   }
 
+  async function refreshUsage(scan: boolean) {
+    setUsageBusy(true)
+    setMessage('')
+    try {
+      const summary = scan
+        ? await invoke<UsageSummary>('scan_usage')
+        : await invoke<UsageSummary>('get_usage_summary')
+      const sessions = await invoke<UsageSessionInfo[]>('get_usage_sessions', { limit: 12 })
+      setUsageSummary(summary)
+      setUsageSessions(sessions)
+      if (scan) setMessage('用量扫描完成。')
+    } catch (error) {
+      setMessage(`读取用量失败：${String(error)}`)
+    } finally {
+      setUsageBusy(false)
+    }
+  }
+
+  async function saveAgents() {
+    await runAction(async () => {
+      await invoke('save_shared_agents', { content: agentsDraft })
+      const next = await invoke<SharedResources>('get_shared_resources')
+      setResources(next)
+      return 'AGENTS.md 已保存。'
+    })
+  }
+
+  async function stopInstance(pid: number) {
+    await runAction(async () => {
+      await invoke('stop_codex_instance', { pid })
+      setInstances(await invoke<CodexInstance[]>('list_codex_instances'))
+      return `已停止实例 PID ${pid}。`
+    })
+  }
+
   async function deleteProfile(profile: Profile) {
     requestConfirm({
       title: `删除 Profile：${profile.name}`,
@@ -498,10 +581,7 @@ function App() {
       intent: 'danger',
       requireText: profile.name,
       requireTextLabel: `输入 ${profile.name}`,
-      details:
-        profile.environmentMode === 'sandbox'
-          ? ['删除本工具保存的 Profile 记录', '删除本工具托管的 Home 目录', '不会删除原始导入目录']
-          : ['删除本工具保存的 Profile 记录', '不会删除默认 Codex Home'],
+      details: ['删除 Profile 记录', '删除本工具托管的 Home 目录'],
       onConfirm: async () => {
         await runAction(async () => {
           await invoke('delete_profile', { profileId: profile.id })
@@ -519,11 +599,8 @@ function App() {
 
   const formIsValid =
     formName.trim() &&
-    (mode === 'edit' || formEnvironmentMode === 'shared' || formSourcePath.trim()) &&
     (formAuthMode === 'account' || formApiKey.trim()) &&
     (!formApiRouteEnabled || (formApiBaseUrl.trim() && formApiRouteModel.trim()))
-  const sharedProfiles = state.profiles.filter((profile) => profile.environmentMode === 'shared').length
-  const sandboxProfiles = state.profiles.filter((profile) => (profile.environmentMode || 'sandbox') === 'sandbox').length
   const accountProfiles = state.profiles.filter((profile) => profile.authMode === 'account').length
   const apiKeyProfiles = state.profiles.filter((profile) => profile.authMode === 'apiKey').length
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId)
@@ -535,9 +612,7 @@ function App() {
     { label: '版本', value: appVersion || '未知' },
   ]
   const stats = [
-    { label: '账号总数', value: state.profiles.length, icon: '👥', tone: 'blue' },
-    { label: '共享环境', value: sharedProfiles, icon: '↔', tone: 'green' },
-    { label: '沙盒环境', value: sandboxProfiles, icon: '◎', tone: 'cyan' },
+    { label: 'Profiles', value: state.profiles.length, icon: '#', tone: 'blue' },
     { label: '账号登录', value: accountProfiles, icon: '◆', tone: 'purple' },
     { label: 'API Key', value: apiKeyProfiles, icon: '⌁', tone: 'mint' },
   ]
@@ -554,7 +629,23 @@ function App() {
           aria-label="Profiles"
           onClick={() => setActiveMenu('profiles')}
         >
-          🚀
+          P
+        </button>
+        <button
+          className={`rail-item ${activeMenu === 'resources' ? 'active' : ''}`}
+          type="button"
+          aria-label="Resources"
+          onClick={() => setActiveMenu('resources')}
+        >
+          A
+        </button>
+        <button
+          className={`rail-item ${activeMenu === 'usage' ? 'active' : ''}`}
+          type="button"
+          aria-label="Usage"
+          onClick={() => setActiveMenu('usage')}
+        >
+          U
         </button>
         <button
           className={`rail-item ${activeMenu === 'settings' ? 'active' : ''}`}
@@ -580,7 +671,7 @@ function App() {
             <span className="brand-mark">C</span>
             <div>
               <p className="eyebrow">Codex Switch Helper</p>
-              <h1>{activeMenu === 'about' ? '关于' : activeMenu === 'settings' ? '设置' : '仪表盘'}</h1>
+              <h1>{activeMenu === 'about' ? '关于' : activeMenu === 'settings' ? '设置' : activeMenu === 'resources' ? '共享资源' : activeMenu === 'usage' ? '用量' : 'Profiles'}</h1>
             </div>
           </div>
           {activeMenu === 'profiles' && (
@@ -642,7 +733,6 @@ function App() {
 
                 <div className="profile-card-grid">
                   {state.profiles.map((profile) => {
-                    const isSandbox = (profile.environmentMode || 'sandbox') === 'sandbox'
                     const isActive = profile.id === state.activeProfileId
                     return (
                       <button
@@ -654,7 +744,7 @@ function App() {
                         <span className="profile-card-topline">
                           <span className="profile-avatar">{(profile.name || 'C').slice(0, 1).toUpperCase()}</span>
                           <span className="profile-badges">
-                            <em>{isSandbox ? '沙盒' : '共享'}</em>
+                            <em>{profile.authMode === 'apiKey' ? 'API Key' : '账号'}</em>
                             {isActive && <em className="hot">当前</em>}
                           </span>
                         </span>
@@ -685,8 +775,6 @@ function App() {
                     busy={busy}
                     mode={mode}
                     name={formName}
-                    sourcePath={formSourcePath}
-                    environmentMode={formEnvironmentMode}
                     onApiKeyChange={setFormApiKey}
                     onAuthModeChange={setFormAuthMode}
                     onApiBaseUrlChange={setFormApiBaseUrl}
@@ -696,29 +784,27 @@ function App() {
                     onAuthJsonPathChange={setFormAuthJsonPath}
                     onCancel={() => setMode('detail')}
                     onChooseAuthJsonFile={chooseAuthJsonFile}
-                    onChooseDirectory={chooseSourceDirectory}
                     onNameChange={setFormName}
-                    onEnvironmentModeChange={setFormEnvironmentMode}
                     onSave={saveProfileForm}
                     onTest={testLoginForm}
-                    onSourcePathChange={setFormSourcePath}
                     valid={Boolean(formIsValid)}
                   />
                 ) : selectedProfile ? (
                   <ProfileDetail
                     busy={busy}
-                    inspection={inspection}
+                    instances={instances.filter((instance) => instance.profileId === selectedProfile.id)}
                     profile={selectedProfile}
                     onDelete={() => deleteProfile(selectedProfile)}
                     onEdit={() => startEditProfile(selectedProfile)}
                     onLaunch={() => launchProfile(selectedProfile.id)}
                     onTest={() => testProfile(selectedProfile.id)}
                     onReveal={() => revealProfile(selectedProfile.id)}
+                    onStop={stopInstance}
                   />
                 ) : (
                   <div className="empty-state">
                     <h2>选择或新建一个 Profile</h2>
-                    <p>新建时默认只保存登录数据并共享默认 Codex Home；需要隔离时可选择沙盒模式。</p>
+                    <p>每个 Profile 使用独立托管目录。</p>
                     <button className="primary-action" onClick={startNewProfile} type="button">
                       新建 Profile
                     </button>
@@ -727,12 +813,28 @@ function App() {
               </section>
             </section>
           </>
+        ) : activeMenu === 'resources' ? (
+          <ResourcesPanel
+            busy={busy}
+            draft={agentsDraft}
+            resources={resources}
+            onChange={setAgentsDraft}
+            onSave={saveAgents}
+          />
+        ) : activeMenu === 'usage' ? (
+          <UsageDashboard
+            busy={usageBusy}
+            summary={usageSummary}
+            sessions={usageSessions}
+            onRefresh={() => refreshUsage(false)}
+            onScan={() => refreshUsage(true)}
+          />
         ) : activeMenu === 'settings' ? (
           <section className="settings-grid">
             <section className="panel settings-form-panel">
               <div className="section-title">
                 <h2>代理</h2>
-                <p>保存后本程序会立即使用代理；启动 Codex 前也会写入用户级 HTTP_PROXY、HTTPS_PROXY 和 ALL_PROXY。</p>
+                <p>代理会应用到本程序和之后启动的 Codex 实例。</p>
               </div>
 
               <label className="toggle-row settings-toggle">
@@ -835,6 +937,207 @@ function App() {
   )
 }
 
+function ResourcesPanel(props: {
+  busy: boolean
+  draft: string
+  resources: SharedResources | null
+  onChange: (value: string) => void
+  onSave: () => void
+}) {
+  return (
+    <section className="resources-grid">
+      <section className="panel resource-editor">
+        <div className="panel-header">
+          <div className="section-title">
+            <h2>AGENTS.md</h2>
+            <code>{props.resources?.agentsPath || '~/.agents/AGENTS.md'}</code>
+          </div>
+          <button className="primary-action compact" disabled={props.busy} onClick={props.onSave} type="button">
+            保存
+          </button>
+        </div>
+        <textarea
+          aria-label="AGENTS.md 内容"
+          className="agents-editor"
+          onChange={(event) => props.onChange(event.target.value)}
+          spellCheck={false}
+          value={props.draft}
+        />
+      </section>
+      <section className="panel skills-panel">
+        <div className="section-title">
+          <h2>Skills</h2>
+          <code>{props.resources?.skillsPath || '~/.agents/skills'}</code>
+        </div>
+        <div className="skills-list">
+          {props.resources?.skills.length ? props.resources.skills.map((skill) => (
+            <article className="skill-row" key={skill.path}>
+              <strong>{skill.name}</strong>
+              {skill.description && <p>{skill.description}</p>}
+              <code>{skill.path}</code>
+            </article>
+          )) : <p className="empty">未发现 skills。</p>}
+        </div>
+      </section>
+    </section>
+  )
+}
+
+function UsageDashboard(props: {
+  busy: boolean
+  summary: UsageSummary | null
+  sessions: UsageSessionInfo[]
+  onRefresh: () => void
+  onScan: () => void
+}) {
+  const summaryStats = props.summary
+    ? [
+        { label: '调用数', value: formatNumber(props.summary.totalCalls), tone: 'blue' },
+        { label: '总 Tokens', value: formatNumber(props.summary.totalTokens), tone: 'green' },
+        { label: '输入 Tokens', value: formatNumber(props.summary.totalInputTokens), tone: 'cyan' },
+        { label: '输出 Tokens', value: formatNumber(props.summary.totalOutputTokens), tone: 'purple' },
+        { label: '活跃会话', value: formatNumber(props.summary.activeSessions), tone: 'mint' },
+      ]
+    : []
+
+  return (
+    <section className="usage-grid">
+      <section className="panel usage-summary-panel">
+        <div className="panel-header">
+          <div className="section-title">
+            <h2>Codex 用量</h2>
+            <p>只统计通过本工具启动 Profile 后产生的新记录；旧记录和默认 Home 不计入。</p>
+          </div>
+          <div className="header-actions">
+            <button className="secondary-action compact" disabled={props.busy} onClick={props.onRefresh} type="button">
+              刷新
+            </button>
+            <button className="primary-action compact" disabled={props.busy} onClick={props.onScan} type="button">
+              {props.busy ? '扫描中...' : '扫描用量'}
+            </button>
+          </div>
+        </div>
+
+        {props.summary ? (
+          <>
+            <div className="usage-stat-grid">
+              {summaryStats.map((item) => (
+                <article className="stat-card usage-stat-card" key={item.label}>
+                  <span className={`stat-icon ${item.tone}`}>#</span>
+                  <div>
+                    <p>{item.label}</p>
+                    <strong>{item.value}</strong>
+                  </div>
+                </article>
+              ))}
+            </div>
+            <dl className="usage-facts">
+              <div>
+                <dt>首次记录</dt>
+                <dd>{formatTime(props.summary.firstRecordedAt)}</dd>
+              </div>
+              <div>
+                <dt>最后记录</dt>
+                <dd>{formatTime(props.summary.lastRecordedAt)}</dd>
+              </div>
+              <div>
+                <dt>推理 Tokens</dt>
+                <dd>{formatNumber(props.summary.totalReasoningTokens)}</dd>
+              </div>
+            </dl>
+          </>
+        ) : (
+          <div className="empty-state usage-empty">
+            <h2>还没有用量数据</h2>
+            <p>点击“扫描用量”读取本地 Codex session 文件并生成统计。</p>
+            <button className="primary-action" disabled={props.busy} onClick={props.onScan} type="button">
+              扫描用量
+            </button>
+          </div>
+        )}
+      </section>
+
+      <section className="panel usage-profile-panel">
+        <div className="section-title">
+          <h2>Profile 分布</h2>
+          <p>按独立托管目录归属到 Profile。</p>
+        </div>
+        <div className="usage-profile-list">
+          {props.summary?.byProfile.length ? (
+            props.summary.byProfile.map((profile) => (
+              <article className="usage-profile-card" key={profile.profileId || profile.homePath}>
+                <div className="usage-profile-heading">
+                  <strong>{profile.profileName || '未匹配 Home'}</strong>
+                  <span>{profile.currentPlanType || '无计划信息'}</span>
+                </div>
+                <div className="usage-meter" aria-label="额度使用百分比">
+                  <span style={{ width: `${Math.max(0, Math.min(profile.currentUsedPercent || 0, 100))}%` }} />
+                </div>
+                <dl>
+                  <div>
+                    <dt>会话数</dt>
+                    <dd>{formatNumber(profile.callCount)}</dd>
+                  </div>
+                  <div>
+                    <dt>总 Tokens</dt>
+                    <dd>{formatNumber(profile.totalTokens)}</dd>
+                  </div>
+                  <div>
+                    <dt>当前额度</dt>
+                    <dd>{formatPercent(profile.currentUsedPercent)}</dd>
+                  </div>
+                  <div>
+                    <dt>重置时间</dt>
+                    <dd>{formatTime(profile.currentResetsAt)}</dd>
+                  </div>
+                </dl>
+                <code>{profile.homePath}</code>
+              </article>
+            ))
+          ) : (
+            <p className="empty">暂无 Profile 用量。</p>
+          )}
+        </div>
+      </section>
+
+      <section className="panel usage-session-panel">
+        <div className="section-title">
+          <h2>最近会话</h2>
+          <p>用于快速定位 token 异常的 session。</p>
+        </div>
+        <div className="usage-session-list">
+          {props.sessions.length ? (
+            props.sessions.map((session) => (
+              <article className="usage-session-row" key={`${session.homePath}-${session.sessionId}`}>
+                <div>
+                  <strong>{session.profileName || '未匹配 Home'}</strong>
+                  <span>{session.cwd || session.homePath}</span>
+                </div>
+                <dl>
+                  <div>
+                    <dt>调用</dt>
+                    <dd>{formatNumber(session.callCount)}</dd>
+                  </div>
+                  <div>
+                    <dt>Tokens</dt>
+                    <dd>{formatNumber(session.totalTokens)}</dd>
+                  </div>
+                  <div>
+                    <dt>最后记录</dt>
+                    <dd>{formatTime(session.lastRecordedAt)}</dd>
+                  </div>
+                </dl>
+              </article>
+            ))
+          ) : (
+            <p className="empty">暂无最近会话。</p>
+          )}
+        </div>
+      </section>
+    </section>
+  )
+}
+
 function ConfirmDialog(props: {
   busy: boolean
   request: ConfirmRequest
@@ -907,10 +1210,8 @@ function ProfileForm(props: {
   authJsonPath: string
   authMode: AuthMode
   busy: boolean
-  environmentMode: EnvironmentMode
   mode: 'new' | 'edit'
   name: string
-  sourcePath: string
   valid: boolean
   onApiKeyChange: (value: string) => void
   onApiBaseUrlChange: (value: string) => void
@@ -921,11 +1222,8 @@ function ProfileForm(props: {
   onAuthModeChange: (value: AuthMode) => void
   onCancel: () => void
   onChooseAuthJsonFile: () => void
-  onChooseDirectory: () => void
-  onEnvironmentModeChange: (value: EnvironmentMode) => void
   onNameChange: (value: string) => void
   onSave: () => void
-  onSourcePathChange: (value: string) => void
   onTest: () => void
 }) {
   const canTest = props.authMode === 'account' ? true : Boolean(props.apiKey.trim())
@@ -933,7 +1231,6 @@ function ProfileForm(props: {
     <div className="form-shell">
       <div className="section-title">
         <h2>{props.mode === 'new' ? '新建 Profile' : '编辑 Profile'}</h2>
-        <p>{props.mode === 'new' ? '选择账号登录或 API Key 登录；API Key 可绑定第三方 OpenAI-compatible 路由。' : '编辑名称、登录凭据和第三方路由。环境模式创建后不在这里修改。'}</p>
       </div>
 
       <label>
@@ -941,27 +1238,12 @@ function ProfileForm(props: {
         <input placeholder="例如 personal / work" value={props.name} onChange={(event) => props.onNameChange(event.target.value)} />
       </label>
 
-      {props.mode === 'new' && (
-        <div className="field-block">
-          <span>环境模式</span>
-          <div className="segmented">
-            <button className={props.environmentMode === 'shared' ? 'active' : ''} onClick={() => props.onEnvironmentModeChange('shared')} type="button">
-              共享环境
-            </button>
-            <button className={props.environmentMode === 'sandbox' ? 'active' : ''} onClick={() => props.onEnvironmentModeChange('sandbox')} type="button">
-              沙盒模式
-            </button>
-          </div>
-          <p className="hint">共享环境只切换身份和配置；沙盒模式复制完整 Codex Home 并隔离启动。</p>
-        </div>
-      )}
-
       <div className="field-block">
         <span>登录方式</span>
         <div className="login-option-grid">
           <button className={`login-option ${props.authMode === 'account' ? 'active' : ''}`} onClick={() => props.onAuthModeChange('account')} type="button">
             <strong>账号登录</strong>
-            <small>{props.environmentMode === 'shared' ? '直接使用所选 Home 中的账号态' : '可导入 auth.json 作为账号态'}</small>
+            <small>使用 auth.json</small>
           </button>
           <button className={`login-option ${props.authMode === 'apiKey' ? 'active' : ''}`} onClick={() => props.onAuthModeChange('apiKey')} type="button">
             <strong>API Key</strong>
@@ -979,7 +1261,7 @@ function ProfileForm(props: {
               选择文件
             </button>
           </div>
-          <p className="hint">共享模式可留空，启动时直接使用所选 Home 的 auth.json；选择文件时会保存一份账号态快照。</p>
+          <p className="hint">留空时从默认 Codex Home 复制登录状态。</p>
         </div>
       ) : (
         <div className="route-card">
@@ -1015,23 +1297,6 @@ function ProfileForm(props: {
         </div>
       )}
 
-      {props.mode === 'new' && (
-        <div className="field-block">
-          <span>{props.environmentMode === 'shared' ? 'Codex Home（可选）' : '导入源目录'}</span>
-          <div className="path-picker">
-            <input placeholder="选择一个已有 Codex Home 目录" value={props.sourcePath} onChange={(event) => props.onSourcePathChange(event.target.value)} />
-            <button className="secondary-action" disabled={props.busy} onClick={props.onChooseDirectory} type="button">
-              选择目录
-            </button>
-          </div>
-          <p className="hint">
-            {props.environmentMode === 'sandbox'
-              ? '沙盒模式仍需要源目录，源目录会被复制到工具托管 Home。'
-              : '共享模式不会复制或导入此目录；它就是启动时写入 CODEX_HOME 的目标 Home。留空则使用默认 ~/.codex。'}
-          </p>
-        </div>
-      )}
-
       <div className="actions">
         <button className="primary-action" disabled={props.busy || !props.valid} onClick={props.onSave} type="button">
           {props.mode === 'new' ? '创建 Profile' : '保存修改'}
@@ -1049,21 +1314,20 @@ function ProfileForm(props: {
 
 function ProfileDetail(props: {
   busy: boolean
+  instances: CodexInstance[]
   profile: Profile
-  inspection: ProfileInspection | null
   onDelete: () => void
   onEdit: () => void
   onLaunch: () => void
   onTest: () => void
   onReveal: () => void
+  onStop: (pid: number) => void
 }) {
-  const isSandbox = (props.profile.environmentMode || 'sandbox') === 'sandbox'
   return (
     <div className="form-shell">
       <div className="panel-header">
         <div className="section-title">
           <h2>{props.profile.name}</h2>
-          <p>{isSandbox ? '当前选中的沙盒 Codex Home 配置。' : '当前选中的共享环境登录配置。'}</p>
         </div>
         <button className="secondary-action" disabled={props.busy} onClick={props.onEdit} type="button">
           编辑
@@ -1072,50 +1336,12 @@ function ProfileDetail(props: {
 
       <dl className="facts">
         <div>
-          <dt>{isSandbox ? '托管 Codex Home' : '默认 Codex Home'}</dt>
+          <dt>托管目录</dt>
           <dd>{props.profile.homePath}</dd>
         </div>
         <div>
-          <dt>环境模式</dt>
-          <dd>{isSandbox ? '沙盒模式' : '共享环境'}</dd>
-        </div>
-        {isSandbox && (
-          <div>
-            <dt>导入来源</dt>
-            <dd>{props.profile.importSourcePath || '旧版本 Profile，无导入来源记录'}</dd>
-          </div>
-        )}
-        <div>
           <dt>登录方式</dt>
           <dd>{props.profile.authMode === 'apiKey' ? 'API Key 登录' : '账号登录'}</dd>
-        </div>
-        {props.profile.authMode === 'apiKey' && (
-          <>
-            <div>
-              <dt>提供商</dt>
-              <dd>{API_PROVIDER_PRESETS[props.profile.apiProvider || 'custom']?.label || '自定义'}</dd>
-            </div>
-            <div>
-              <dt>Base URL</dt>
-              <dd>{props.profile.apiBaseUrl || 'https://api.openai.com/v1'}</dd>
-            </div>
-            <div>
-              <dt>第三方路由</dt>
-              <dd>{props.profile.apiRouteEnabled ? `已启用，模型 ${props.profile.apiRouteModel || '-'}` : '未启用'}</dd>
-            </div>
-          </>
-        )}
-        <div>
-          <dt>auth.json</dt>
-          <dd>{props.inspection?.hasAuthJson ? '存在' : '未发现'}</dd>
-        </div>
-        <div>
-          <dt>config.toml</dt>
-          <dd>{props.inspection?.hasConfigToml ? '存在' : '未发现'}</dd>
-        </div>
-        <div>
-          <dt>文件数量</dt>
-          <dd>{props.inspection?.fileCount ?? '-'}</dd>
         </div>
       </dl>
 
@@ -1126,13 +1352,27 @@ function ProfileDetail(props: {
         <button className="secondary-action" disabled={props.busy} onClick={props.onTest} type="button">
           测试连通
         </button>
-        {isSandbox && <button className="secondary-action" disabled={props.busy} onClick={props.onReveal} type="button">
+        <button className="secondary-action" disabled={props.busy} onClick={props.onReveal} type="button">
           打开托管目录
-        </button>}
+        </button>
         <button className="danger" disabled={props.busy} onClick={props.onDelete} type="button">
           删除 Profile
         </button>
       </div>
+      {props.instances.length > 0 && (
+        <section className="instance-list">
+          <h3>运行中的实例</h3>
+          {props.instances.map((instance) => (
+            <div className="instance-row" key={instance.pid}>
+              <span>PID {instance.pid}</span>
+              <time>{new Date(instance.startedAt).toLocaleString()}</time>
+              <button className="danger compact" disabled={props.busy} onClick={() => props.onStop(instance.pid)} type="button">
+                停止
+              </button>
+            </div>
+          ))}
+        </section>
+      )}
     </div>
   )
 }

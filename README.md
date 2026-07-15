@@ -11,41 +11,27 @@ Tauri desktop helper for switching Codex App profiles on Windows.
 ## What It Does
 
 - Manages multiple Codex Profiles with separate saved auth data.
-- Supports two environment modes: shared environment and sandbox mode.
+- Gives every Profile an isolated tool-managed Home.
 - Supports account-login Profiles and API-key Profiles.
+- Edits shared `~/.agents/AGENTS.md` and lists `~/.agents/skills`.
+- Scans local session usage by Profile.
 - Supports HTTP and SOCKS5 proxy settings for the helper app and Codex launches.
+- Runs multiple isolated Codex instances in parallel.
 - Provides protective confirmation dialogs for dangerous actions such as deleting Profiles or changing user-level environment variables.
 - Launches the Windows Codex App through `shell:AppsFolder`.
 - Can restore default Codex Home behavior by deleting user-level `CODEX_HOME`.
 - Checks for app updates through signed Tauri updater artifacts published on GitHub Releases.
 
-## Environment Modes
+## Profile Isolation
 
-### Shared environment
-
-Shared environment Profiles reuse one Codex Home path and the app switches only the Profile-specific data needed for identity and model behavior:
-
-- Account Profiles write their saved `auth.json` into the shared Home.
-- API-key Profiles write their saved `OPENAI_API_KEY` and remove stale `auth.json` from the shared Home.
-- Profile-specific `config.toml` content is written into the shared Home so model/provider settings switch with the Profile.
-- The app writes user-level `CODEX_HOME` to the shared Home before launch.
-
-This mode is useful when Profiles should share local sessions, caches, tools, and other Codex Home state while still switching accounts and model configuration.
-
-### Sandbox mode
-
-Sandbox mode preserves the original isolated behavior:
-
-- New Profiles copy the selected source Codex Home into `app_data/profiles/<profileId>/home`.
-- Launching a sandbox Profile writes user-level `CODEX_HOME` to that managed Home.
-- Deleting a sandbox Profile deletes only the tool-owned managed Home, not the original import source.
-
-Use sandbox mode when you want a Profile to keep fully isolated Codex Home state.
+- New Profiles copy the default Codex Home into `app_data/profiles/<profileId>/home`.
+- Legacy shared Profiles are copied into managed Homes without deleting their original directories.
+- Each launch gets a process-local `CODEX_HOME` and a dedicated `--user-data-dir`.
+- Deleting a Profile removes only its tool-managed directory.
 
 ## Auth Behavior
 
-- Account-login Profiles clear user-level `OPENAI_API_KEY` before launch.
-- API-key Profiles write their saved key to user-level `OPENAI_API_KEY` before launch.
+- Credentials and `OPENAI_API_KEY` are passed only to the launched Codex process.
 - API keys and saved auth/config data are currently stored in local JSON without encryption.
 
 ## Default Launch
@@ -59,8 +45,8 @@ The settings page contains Codex launch settings and proxy settings.
 
 - Proxy supports `http` and `socks5`.
 - Saving proxy settings applies them to this helper app immediately.
-- Launching Codex with proxy enabled writes user-level `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY`.
-- Launching Codex with proxy disabled clears the proxy environment variables managed by this app.
+- Proxy settings are passed to newly launched Codex instances through their process environment.
+- The new behavior clears user-level `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` values written by older versions.
 - Dangerous operations use in-app confirmation dialogs. Deleting a Profile requires typing the Profile name.
 
 ## Testing With Alternate Data
@@ -121,4 +107,4 @@ npm run tauri:build
 
 Also update `CHANGELOG.md`, `README.md`, and `README.zh-CN.md` before tagging a release.
 
-Current release: `0.1.5`.
+Current release: `0.2.0`.

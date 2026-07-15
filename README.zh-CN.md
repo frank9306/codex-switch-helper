@@ -11,41 +11,27 @@
 ## 功能
 
 - 管理多个 Codex Profile，并为每个 Profile 保存独立登录数据。
-- 支持两种环境模式：共享环境和沙盒模式。
+- 每个 Profile 使用独立的工具托管目录。
 - 支持账号登录 Profile 和 API Key 登录 Profile。
+- 查看和编辑共享的 `~/.agents/AGENTS.md`，并列出 `~/.agents/skills`。
+- 按 Profile 扫描本地 session 用量。
 - 支持为本工具和 Codex 启动配置 HTTP / SOCKS5 代理。
+- 支持同时启动和停止多个独立 Codex 实例。
 - 删除 Profile、修改用户级环境变量等危险操作会显示保护性确认弹窗。
 - 通过 `shell:AppsFolder` 启动 Windows Codex App。
 - 可以删除用户级 `CODEX_HOME`，恢复 Codex 默认 Home 行为。
 - 通过发布到 GitHub Releases 的 Tauri 签名更新产物检查和安装应用更新。
 
-## 环境模式
+## Profile 隔离
 
-### 共享环境
-
-共享环境 Profile 共用同一个 Codex Home 路径，应用只切换身份和模型行为所需的数据：
-
-- 账号登录 Profile 会把保存的 `auth.json` 写入共享 Home。
-- API Key Profile 会写入保存的 `OPENAI_API_KEY`，并移除共享 Home 里残留的 `auth.json`。
-- Profile 自己的 `config.toml` 内容会写入共享 Home，让模型、provider、base_url 等配置跟随 Profile 切换。
-- 启动前应用会把用户级 `CODEX_HOME` 写为共享 Home。
-
-适合多个 Profile 共享本地 sessions、缓存、工具等 Codex Home 状态，但账号和模型配置需要切换的场景。
-
-### 沙盒模式
-
-沙盒模式保留原来的隔离行为：
-
-- 新建 Profile 时把选择的源 Codex Home 复制到 `app_data/profiles/<profileId>/home`。
-- 启动沙盒 Profile 时把用户级 `CODEX_HOME` 写为该托管 Home。
-- 删除沙盒 Profile 只删除工具生成的托管 Home，不删除原始导入目录。
-
-如果需要完整隔离 Codex Home 状态，请使用沙盒模式。
+- 新建 Profile 自动把默认 Codex Home 复制到 `app_data/profiles/<profileId>/home`。
+- 旧共享 Profile 会安全复制到新的托管目录，原 Home 不会删除。
+- 启动时为每个 Profile 设置独立进程级 `CODEX_HOME` 和 `--user-data-dir`。
+- 删除 Profile 只删除工具托管目录。
 
 ## 登录行为
 
-- 账号登录 Profile 启动前会清除用户级 `OPENAI_API_KEY`。
-- API Key 登录 Profile 启动前会把保存的 key 写入用户级 `OPENAI_API_KEY`。
+- 登录凭据和 `OPENAI_API_KEY` 只传递给对应 Codex 进程，不修改用户级变量。
 - API Key 以及保存的 auth/config 数据当前明文存储在本地 JSON 中，暂未加密。
 
 ## 默认启动
@@ -59,8 +45,8 @@
 
 - 代理支持 `http` 和 `socks5`。
 - 保存代理后，本工具会立即使用该代理。
-- 启用代理后启动 Codex，会写入用户级 `HTTP_PROXY`、`HTTPS_PROXY` 和 `ALL_PROXY`。
-- 关闭代理后启动 Codex，会清理由本工具管理的代理环境变量。
+- 代理通过进程环境传递给之后启动的 Codex 实例。
+- 新版本会清理旧版本曾写入的用户级 `HTTP_PROXY`、`HTTPS_PROXY` 和 `ALL_PROXY`。
 - 危险操作使用应用内确认弹窗。删除 Profile 时必须输入 Profile 名称。
 
 ## 使用测试数据
@@ -121,4 +107,4 @@ npm run tauri:build
 
 发布前必须更新 `CHANGELOG.md`、`README.md` 和 `README.zh-CN.md`。
 
-当前版本：`0.1.5`。
+当前版本：`0.2.0`。

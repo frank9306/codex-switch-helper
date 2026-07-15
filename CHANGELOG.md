@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0 - 2026-07-15
+
+- Isolated every Profile in a tool-managed Codex Home with process-local credentials and proxy settings.
+- Added concurrent Codex instances with dedicated user-data directories and instance controls.
+- Added local session usage scanning, SQLite-backed token summaries, and per-Profile usage details.
+- Added shared AGENTS.md editing and installed skill discovery.
+- Migrated legacy shared Profiles without deleting their original Home directories.
+- Removed the synchronous Codex AppID scan from startup to avoid a recurring launch pause.
+
 ## 0.1.5 - 2026-07-08
 
 - Added a dedicated settings page for proxy and Codex launch settings.

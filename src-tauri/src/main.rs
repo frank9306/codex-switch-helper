@@ -1,11 +1,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod models;
+mod modules;
+
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::{
     env, fs, io,
     path::{Path, PathBuf},
     process::Command,
+    sync::{Mutex, OnceLock},
 };
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
@@ -21,6 +27,10 @@ const DATA_FILE_OVERRIDE_ENV_KEY: &str = "CODEX_SWITCH_HELPER_DATA_FILE";
 
 const CODEX_PROCESS_NAME: &str = "Codex.exe";
 const CODEX_CONFIG_FILENAME: &str = "config.toml";
+const SHARED_AGENTS_FILENAME: &str = "AGENTS.md";
+const ENVIRONMENT_BROADCAST_TIMEOUT_MS: u32 = 500;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,8 +38,9 @@ struct Profile {
     id: String,
     name: String,
     home_path: String,
+    #[serde(default, skip_serializing)]
     import_source_path: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     environment_mode: EnvironmentMode,
     #[serde(default)]
     auth_mode: AuthMode,
@@ -117,6 +128,38 @@ struct ConnectionTestResult {
     endpoint: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillInfo {
+    name: String,
+    path: String,
+    description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SharedResources {
+    agents_path: String,
+    agents_content: String,
+    skills_path: String,
+    skills: Vec<SkillInfo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexInstance {
+    profile_id: String,
+    profile_name: String,
+    pid: u32,
+    started_at: String,
+}
+
+static CODEX_INSTANCES: OnceLock<Mutex<Vec<CodexInstance>>> = OnceLock::new();
+
+fn codex_instances() -> &'static Mutex<Vec<CodexInstance>> {
+    CODEX_INSTANCES.get_or_init(|| Mutex::new(Vec::new()))
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -144,7 +187,9 @@ impl Default for StoredData {
 #[tauri::command]
 fn get_app_state(app: AppHandle) -> Result<AppState, String> {
     let data = load_data(&app)?;
-    apply_proxy_settings_to_current_process(&data.settings)?;
+    if apply_proxy_settings(&data.settings)? {
+        broadcast_environment_change();
+    }
     Ok(AppState {
         profiles: data.profiles,
         settings: data.settings,
@@ -165,7 +210,6 @@ fn create_profile(
     api_base_url: Option<String>,
     api_route_enabled: bool,
     api_route_model: Option<String>,
-    environment_mode: EnvironmentMode,
 ) -> Result<Profile, String> {
     let name = normalized_name(&name)?;
     validate_auth(&auth_mode, api_key.as_deref())?;
@@ -175,33 +219,22 @@ fn create_profile(
         api_base_url.as_deref(),
         api_route_model.as_deref(),
     )?;
-    let source_path = normalize_optional_home_path(&source_path)?;
+    let source_path = normalize_optional_home_path(&source_path)?.unwrap_or(default_codex_home()?);
     let auth_json_path =
         normalize_optional_home_path(auth_json_path.as_deref().unwrap_or_default())?;
-    if matches!(environment_mode, EnvironmentMode::Sandbox) {
-        let source_path = source_path
-            .as_deref()
-            .ok_or_else(|| "沙盒模式需要选择导入源目录。".to_string())?;
-        if !source_path.is_dir() {
-            return Err("导入源目录不存在或不是目录。".to_string());
-        }
+    if !source_path.is_dir() {
+        return Err("导入源目录不存在或不是目录。".to_string());
     }
     if let Some(auth_json_path) = auth_json_path.as_deref() {
         if !auth_json_path.is_file() {
             return Err("auth.json 文件不存在。".to_string());
         }
     }
-    if let Some(source_path) = source_path.as_deref() {
-        if !source_path.is_dir() {
-            return Err("Codex Home 目录不存在或不是目录。".to_string());
-        }
-    }
-
     let mut data = load_data(&app)?;
     let profile = new_profile(
         &app,
         &name,
-        source_path.as_deref(),
+        Some(source_path.as_path()),
         auth_mode,
         api_key,
         auth_json_path.as_deref(),
@@ -209,14 +242,9 @@ fn create_profile(
         api_base_url,
         api_route_enabled,
         api_route_model,
-        environment_mode,
+        EnvironmentMode::Sandbox,
     )?;
-    if profile.environment_mode == EnvironmentMode::Sandbox {
-        let source_path = source_path
-            .as_deref()
-            .ok_or_else(|| "沙盒模式需要选择导入源目录。".to_string())?;
-        copy_dir_recursive(source_path, Path::new(&profile.home_path)).map_err(format_io_error)?;
-    }
+    copy_dir_recursive(&source_path, Path::new(&profile.home_path)).map_err(format_io_error)?;
     data.profiles.push(profile.clone());
     if data.active_profile_id.is_none() {
         data.active_profile_id = Some(profile.id.clone());
@@ -314,7 +342,7 @@ $candidate = Get-StartApps | Where-Object { $_.Name -eq 'Codex' -and $_.AppID -l
 if ($candidate) { $candidate; exit }
 "#;
 
-    let output = Command::new("powershell.exe")
+    let output = hidden_command("powershell.exe")
         .args(["-NoProfile", "-Command", script])
         .output()
         .map_err(format_io_error)?;
@@ -334,7 +362,9 @@ if ($candidate) { $candidate; exit }
 #[tauri::command]
 fn launch_default_codex(app: AppHandle) -> Result<(), String> {
     let data = load_data(&app)?;
-    apply_proxy_settings(&data.settings)?;
+    if apply_proxy_settings(&data.settings)? {
+        broadcast_environment_change();
+    }
     launch_codex_app(&data.settings.codex_app_id)
 }
 
@@ -403,7 +433,16 @@ fn test_login_connection(
 }
 
 #[tauri::command]
-fn launch_codex(app: AppHandle, profile_id: String) -> Result<(), String> {
+fn test_proxy_connection(settings: AppSettings) -> Result<ConnectionTestResult, String> {
+    if !settings.proxy_enabled {
+        return Err("请先启用代理。".to_string());
+    }
+    let proxy = proxy_url(&settings)?;
+    test_http_proxy(&proxy, "https://api.openai.com/v1/models")
+}
+
+#[tauri::command]
+fn launch_codex(app: AppHandle, profile_id: String) -> Result<CodexInstance, String> {
     let mut data = load_data(&app)?;
     let profile_index = data
         .profiles
@@ -411,24 +450,17 @@ fn launch_codex(app: AppHandle, profile_id: String) -> Result<(), String> {
         .position(|profile| profile.id == profile_id)
         .ok_or_else(|| "Profile 不存在。".to_string())?;
 
-    match data.profiles[profile_index].environment_mode {
-        EnvironmentMode::Shared => {
-            let home_path = PathBuf::from(&data.profiles[profile_index].home_path);
-            fs::create_dir_all(&home_path).map_err(format_io_error)?;
-            write_user_env(CODEX_HOME_ENV_KEY, path_to_string(&home_path)?)?;
-            apply_profile_to_home(&app, &data.profiles[profile_index], &home_path)?;
-        }
-        EnvironmentMode::Sandbox => {
-            let home_path = PathBuf::from(&data.profiles[profile_index].home_path);
-            fs::create_dir_all(&home_path).map_err(format_io_error)?;
-
-            write_user_env(CODEX_HOME_ENV_KEY, path_to_string(&home_path)?)?;
-            if let Some(config_toml) = migrate_home_config_paths(&app, &home_path)? {
-                data.profiles[profile_index].config_toml = Some(config_toml);
-            }
-            apply_profile_auth_to_home(&data.profiles[profile_index], &home_path, false)?;
-        }
+    let home_path = PathBuf::from(&data.profiles[profile_index].home_path);
+    fs::create_dir_all(&home_path).map_err(format_io_error)?;
+    if let Some(config_toml) = data.profiles[profile_index].config_toml.as_deref() {
+        let config_toml = rewrite_shared_paths_to_home(&app, config_toml, &home_path)?;
+        fs::write(home_path.join(CODEX_CONFIG_FILENAME), config_toml).map_err(format_io_error)?;
     }
+    if let Some(config_toml) = migrate_home_config_paths(&app, &home_path)? {
+        data.profiles[profile_index].config_toml = Some(config_toml);
+    }
+    apply_profile_auth_files_to_home(&data.profiles[profile_index], &home_path, false)?;
+    sync_shared_agents_to_home(&home_path)?;
     if let Some(config_toml) = migrate_home_config_paths(
         &app,
         &PathBuf::from(&data.profiles[profile_index].home_path),
@@ -436,31 +468,75 @@ fn launch_codex(app: AppHandle, profile_id: String) -> Result<(), String> {
         data.profiles[profile_index].config_toml = Some(config_toml);
     }
 
-    broadcast_environment_change();
+    let executable = detect_codex_executable()?
+        .ok_or_else(|| "未找到 Codex.exe，无法使用独立环境启动多开实例。".to_string())?;
+    let app_user_data = app_data_dir(&app)?.join("codex-app-data").join(&profile_id);
+    fs::create_dir_all(&app_user_data).map_err(format_io_error)?;
+    let mut command = hidden_command(executable.to_string_lossy().as_ref());
+    command
+        .arg("--user-data-dir")
+        .arg(&app_user_data)
+        .env(CODEX_HOME_ENV_KEY, &home_path);
+    apply_profile_process_env(&mut command, &data.profiles[profile_index])?;
+    apply_proxy_process_env(&mut command, &data.settings)?;
+    let child = command.spawn().map_err(format_io_error)?;
 
-    apply_proxy_settings(&data.settings)?;
-    launch_codex_app(&data.settings.codex_app_id)?;
-
-    let now = Utc::now().to_rfc3339();
+    let launched_at = Utc::now();
+    let now = launched_at.to_rfc3339();
+    open_usage_db(&app)?.record_profile_launch(
+        &profile_id,
+        &data.profiles[profile_index].home_path,
+        launched_at.timestamp(),
+    )?;
     data.profiles[profile_index].last_used_at = Some(now.clone());
-    data.profiles[profile_index].updated_at = now;
-    data.active_profile_id = Some(profile_id);
-    save_data(&app, &data)
+    data.profiles[profile_index].updated_at = now.clone();
+    data.active_profile_id = Some(profile_id.clone());
+    save_data(&app, &data)?;
+    let instance = CodexInstance {
+        profile_id,
+        profile_name: data.profiles[profile_index].name.clone(),
+        pid: child.id(),
+        started_at: now,
+    };
+    codex_instances()
+        .lock()
+        .map_err(|_| "实例状态锁已损坏。".to_string())?
+        .push(instance.clone());
+    Ok(instance)
 }
 
-fn apply_profile_env_auth(profile: &Profile) -> Result<(), String> {
+fn apply_profile_process_env(command: &mut Command, profile: &Profile) -> Result<(), String> {
     match profile.auth_mode {
-        AuthMode::Account => delete_user_env(OPENAI_API_KEY),
+        AuthMode::Account => {
+            command.env_remove(OPENAI_API_KEY);
+        }
         AuthMode::ApiKey => {
-            let api_key = profile
+            let key = profile
                 .api_key
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| "API Key 登录方式需要填写 OPENAI_API_KEY。".to_string())?;
-            write_user_env(OPENAI_API_KEY, api_key.to_string())
+            command.env(OPENAI_API_KEY, key);
         }
     }
+    Ok(())
+}
+
+fn apply_proxy_process_env(command: &mut Command, settings: &AppSettings) -> Result<(), String> {
+    if settings.proxy_enabled {
+        let proxy = proxy_url(settings)?;
+        command
+            .env(HTTP_PROXY_ENV_KEY, &proxy)
+            .env(HTTPS_PROXY_ENV_KEY, &proxy)
+            .env(ALL_PROXY_ENV_KEY, &proxy);
+    } else {
+        command
+            .env_remove(HTTP_PROXY_ENV_KEY)
+            .env_remove(HTTPS_PROXY_ENV_KEY)
+            .env_remove(ALL_PROXY_ENV_KEY);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -468,7 +544,7 @@ fn reveal_profile_folder(app: AppHandle, profile_id: String) -> Result<(), Strin
     let data = load_data(&app)?;
     let profile = find_profile(&data, &profile_id)?;
     fs::create_dir_all(&profile.home_path).map_err(format_io_error)?;
-    Command::new("explorer.exe")
+    hidden_command("explorer.exe")
         .arg(&profile.home_path)
         .spawn()
         .map_err(format_io_error)?;
@@ -507,11 +583,77 @@ fn launch_codex_app(app_id: &str) -> Result<(), String> {
         return Err("Codex AppID 不能为空。".to_string());
     }
 
-    Command::new("explorer.exe")
+    hidden_command("explorer.exe")
         .arg(format!("shell:AppsFolder\\{app_id}"))
         .spawn()
         .map_err(format_io_error)?;
     Ok(())
+}
+
+fn detect_codex_executable() -> Result<Option<PathBuf>, String> {
+    let script = r#"
+$packages = Get-AppxPackage | Where-Object { $_.Name -like 'OpenAI.Codex*' -or $_.PackageFamilyName -like 'OpenAI.Codex_*' }
+foreach ($package in $packages) {
+  $candidate = Get-ChildItem -LiteralPath $package.InstallLocation -Filter Codex.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+  if ($candidate) { $candidate; exit }
+}
+$command = Get-Command Codex.exe -ErrorAction SilentlyContinue
+if ($command) { $command.Source }
+"#;
+    let output = hidden_command("powershell.exe")
+        .args(["-NoProfile", "-Command", script])
+        .output()
+        .map_err(format_io_error)?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(PathBuf::from(path)))
+    }
+}
+
+#[tauri::command]
+fn list_codex_instances() -> Result<Vec<CodexInstance>, String> {
+    let mut instances = codex_instances()
+        .lock()
+        .map_err(|_| "实例状态锁已损坏。".to_string())?;
+    instances.retain(|instance| process_running(instance.pid));
+    Ok(instances.clone())
+}
+
+#[tauri::command]
+fn stop_codex_instance(pid: u32) -> Result<(), String> {
+    let tracked = codex_instances()
+        .lock()
+        .map_err(|_| "实例状态锁已损坏。".to_string())?
+        .iter()
+        .any(|instance| instance.pid == pid);
+    if !tracked {
+        return Err("该 PID 不是本程序启动的 Codex 实例。".to_string());
+    }
+    let status = hidden_command("taskkill.exe")
+        .args(["/PID", &pid.to_string(), "/T"])
+        .status()
+        .map_err(format_io_error)?;
+    if !status.success() {
+        return Err(format!("无法停止 Codex 实例 PID {pid}。"));
+    }
+    codex_instances()
+        .lock()
+        .map_err(|_| "实例状态锁已损坏。".to_string())?
+        .retain(|instance| instance.pid != pid);
+    Ok(())
+}
+
+fn process_running(pid: u32) -> bool {
+    hidden_command("tasklist.exe")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).contains(&pid.to_string()))
+        .unwrap_or(false)
 }
 
 fn new_profile(
@@ -595,6 +737,76 @@ fn default_codex_home() -> Result<PathBuf, String> {
         .ok_or_else(|| "无法定位当前用户 Home 目录。".to_string())
 }
 
+fn agents_root() -> Result<PathBuf, String> {
+    env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .map(|home| home.join(".agents"))
+        .ok_or_else(|| "无法定位当前用户 Home 目录。".to_string())
+}
+
+fn shared_agents_path() -> Result<PathBuf, String> {
+    Ok(agents_root()?.join(SHARED_AGENTS_FILENAME))
+}
+
+fn sync_shared_agents_to_home(codex_home: &Path) -> Result<(), String> {
+    let source = shared_agents_path()?;
+    if !source.is_file() {
+        return Ok(());
+    }
+    fs::copy(source, codex_home.join(SHARED_AGENTS_FILENAME))
+        .map(|_| ())
+        .map_err(format_io_error)
+}
+
+#[tauri::command]
+fn get_shared_resources() -> Result<SharedResources, String> {
+    let root = agents_root()?;
+    let agents_path = root.join(SHARED_AGENTS_FILENAME);
+    let skills_path = root.join("skills");
+    let agents_content = if agents_path.is_file() {
+        fs::read_to_string(&agents_path).map_err(format_io_error)?
+    } else {
+        String::new()
+    };
+    let mut skills = Vec::new();
+    if skills_path.is_dir() {
+        for entry in fs::read_dir(&skills_path).map_err(format_io_error)? {
+            let entry = entry.map_err(format_io_error)?;
+            let path = entry.path();
+            let skill_file = path.join("SKILL.md");
+            if !path.is_dir() || !skill_file.is_file() {
+                continue;
+            }
+            let content = fs::read_to_string(&skill_file).unwrap_or_default();
+            let description = content
+                .lines()
+                .find_map(|line| line.strip_prefix("description:"))
+                .map(|value| value.trim().trim_matches('"').to_string());
+            skills.push(SkillInfo {
+                name: entry.file_name().to_string_lossy().to_string(),
+                path: path.to_string_lossy().to_string(),
+                description,
+            });
+        }
+    }
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(SharedResources {
+        agents_path: agents_path.to_string_lossy().to_string(),
+        agents_content,
+        skills_path: skills_path.to_string_lossy().to_string(),
+        skills,
+    })
+}
+
+#[tauri::command]
+fn save_shared_agents(content: String) -> Result<(), String> {
+    let path = shared_agents_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(format_io_error)?;
+    }
+    fs::write(path, content).map_err(format_io_error)
+}
+
 fn read_auth_json(source_path: &Path) -> Result<String, String> {
     read_auth_json_file(&source_path.join("auth.json"))
 }
@@ -614,46 +826,6 @@ fn read_config_toml(source_path: &Path) -> Result<Option<String>, String> {
     fs::read_to_string(config_path)
         .map(Some)
         .map_err(format_io_error)
-}
-
-fn read_profile_config_from_managed_home(
-    app: &AppHandle,
-    profile: &Profile,
-) -> Result<Option<String>, String> {
-    let config_path = managed_profile_home(app, &profile.id)?.join(CODEX_CONFIG_FILENAME);
-    if !config_path.is_file() {
-        return Ok(None);
-    }
-    fs::read_to_string(config_path)
-        .map(Some)
-        .map_err(format_io_error)
-}
-
-fn apply_profile_to_home(
-    app: &AppHandle,
-    profile: &Profile,
-    codex_home: &Path,
-) -> Result<(), String> {
-    apply_profile_config_to_home(app, profile, codex_home)?;
-    apply_profile_auth_to_home(profile, codex_home, false)
-}
-
-fn apply_profile_config_to_home(
-    app: &AppHandle,
-    profile: &Profile,
-    codex_home: &Path,
-) -> Result<(), String> {
-    let config_toml = match profile.config_toml.as_deref() {
-        Some(value) => Some(value.to_string()),
-        None => read_profile_config_from_managed_home(app, profile)?,
-    };
-    let Some(config_toml) = config_toml else {
-        return Ok(());
-    };
-    let config_toml = rewrite_shared_paths_to_home(app, &config_toml, codex_home)?;
-
-    fs::create_dir_all(codex_home).map_err(format_io_error)?;
-    fs::write(codex_home.join(CODEX_CONFIG_FILENAME), config_toml).map_err(format_io_error)
 }
 
 fn migrate_home_config_paths(app: &AppHandle, codex_home: &Path) -> Result<Option<String>, String> {
@@ -697,14 +869,13 @@ fn rewrite_shared_root_to_home(
     Ok(migrated)
 }
 
-fn apply_profile_auth_to_home(
+fn apply_profile_auth_files_to_home(
     profile: &Profile,
     codex_home: &Path,
     require_stored_account_auth: bool,
 ) -> Result<(), String> {
     match profile.auth_mode {
         AuthMode::Account => {
-            delete_user_env(OPENAI_API_KEY)?;
             let auth_json = profile.auth_json.as_deref();
             let auth_path = codex_home.join("auth.json");
             if auth_json.is_none() && !require_stored_account_auth && auth_path.exists() {
@@ -721,7 +892,7 @@ fn apply_profile_auth_to_home(
             if auth_path.exists() {
                 fs::remove_file(auth_path).map_err(format_io_error)?;
             }
-            apply_profile_env_auth(profile)
+            Ok(())
         }
     }
 }
@@ -804,6 +975,15 @@ fn validate_auth_json_content(auth_json: &str) -> Result<(), String> {
         .map_err(|error| format!("auth.json 解析失败：{error}"))
 }
 
+fn hidden_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 fn test_http_bearer(endpoint: &str, bearer: &str) -> Result<ConnectionTestResult, String> {
     let script = format!(
         r#"$ErrorActionPreference = 'Stop'
@@ -822,7 +1002,7 @@ try {{
         bearer = escape_powershell_single_quote(bearer),
         endpoint = escape_powershell_single_quote(endpoint)
     );
-    let output = Command::new("powershell.exe")
+    let output = hidden_command("powershell.exe")
         .args(["-NoProfile", "-Command", &script])
         .output()
         .map_err(format_io_error)?;
@@ -834,6 +1014,38 @@ try {{
         ok: kind == "OK",
         status: if status.is_empty() { stdout } else { status },
         endpoint: endpoint.to_string(),
+    })
+}
+
+fn test_http_proxy(proxy: &str, endpoint: &str) -> Result<ConnectionTestResult, String> {
+    let output = hidden_command("curl.exe")
+        .args([
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "20",
+            "--proxy",
+            proxy,
+            "-o",
+            "NUL",
+            "-sS",
+            "-w",
+            "%{http_code}",
+            endpoint,
+        ])
+        .output()
+        .map_err(format_io_error)?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let ok = output.status.success() && !stdout.is_empty() && stdout != "000";
+    Ok(ConnectionTestResult {
+        ok,
+        status: if stdout.is_empty() || stdout == "000" {
+            stderr
+        } else {
+            stdout
+        },
+        endpoint: format!("{endpoint} via {proxy}"),
     })
 }
 
@@ -926,20 +1138,29 @@ fn apply_proxy_settings_to_current_process(settings: &AppSettings) -> Result<(),
     Ok(())
 }
 
-fn apply_proxy_settings(settings: &AppSettings) -> Result<(), String> {
+fn apply_proxy_settings(settings: &AppSettings) -> Result<bool, String> {
     apply_proxy_settings_to_current_process(settings)?;
-    if settings.proxy_enabled {
-        let proxy_url = proxy_url(settings)?;
-        write_user_env(HTTP_PROXY_ENV_KEY, proxy_url.clone())?;
-        write_user_env(HTTPS_PROXY_ENV_KEY, proxy_url.clone())?;
-        write_user_env(ALL_PROXY_ENV_KEY, proxy_url)?;
-    } else {
-        delete_user_env(HTTP_PROXY_ENV_KEY)?;
-        delete_user_env(HTTPS_PROXY_ENV_KEY)?;
-        delete_user_env(ALL_PROXY_ENV_KEY)?;
+    let legacy_proxy_url =
+        if settings.proxy_host.trim().is_empty() || settings.proxy_port.trim().is_empty() {
+            None
+        } else {
+            Some(format!(
+                "{}://{}:{}",
+                settings.proxy_protocol.trim(),
+                settings.proxy_host.trim(),
+                settings.proxy_port.trim()
+            ))
+        };
+    let mut changed = false;
+    for key in [HTTP_PROXY_ENV_KEY, HTTPS_PROXY_ENV_KEY, ALL_PROXY_ENV_KEY] {
+        if let Some(expected) = legacy_proxy_url.as_deref() {
+            if read_user_env(key)?.as_deref() == Some(expected) {
+                delete_user_env(key)?;
+                changed = true;
+            }
+        }
     }
-    broadcast_environment_change();
-    Ok(())
+    Ok(changed)
 }
 
 fn build_api_route_config(api_base_url: &str, model: &str) -> String {
@@ -1007,8 +1228,39 @@ fn load_data(app: &AppHandle) -> Result<StoredData, String> {
     if !path.exists() {
         return Ok(StoredData::default());
     }
-    let content = fs::read_to_string(path).map_err(format_io_error)?;
-    serde_json::from_str(&content).map_err(|error| format!("配置文件解析失败：{error}"))
+    let content = fs::read_to_string(&path).map_err(format_io_error)?;
+    let mut data: StoredData =
+        serde_json::from_str(&content).map_err(|error| format!("配置文件解析失败：{error}"))?;
+    let mut migrated = false;
+    for profile in &mut data.profiles {
+        if profile.environment_mode == EnvironmentMode::Sandbox && profile.managed {
+            continue;
+        }
+        let source = PathBuf::from(&profile.home_path);
+        let target = managed_profile_home(app, &profile.id)?;
+        if source != target && !target.exists() {
+            if !source.is_dir() {
+                return Err(format!(
+                    "无法迁移 Profile“{}”：原 Home 不存在：{}",
+                    profile.name,
+                    source.display()
+                ));
+            }
+            copy_dir_recursive(&source, &target).map_err(format_io_error)?;
+        }
+        profile.home_path = path_to_string(&target)?;
+        profile.import_source_path = None;
+        profile.environment_mode = EnvironmentMode::Sandbox;
+        profile.managed = true;
+        profile.updated_at = Utc::now().to_rfc3339();
+        migrated = true;
+    }
+    if migrated {
+        let next = serde_json::to_string_pretty(&data)
+            .map_err(|error| format!("配置序列化失败：{error}"))?;
+        fs::write(path, next).map_err(format_io_error)?;
+    }
+    Ok(data)
 }
 
 fn save_data(app: &AppHandle, data: &StoredData) -> Result<(), String> {
@@ -1055,7 +1307,7 @@ fn count_files(path: &Path) -> io::Result<usize> {
 }
 
 fn codex_process_running() -> bool {
-    let output = Command::new("tasklist.exe")
+    let output = hidden_command("tasklist.exe")
         .args(["/FI", &format!("IMAGENAME eq {CODEX_PROCESS_NAME}"), "/NH"])
         .output();
     match output {
@@ -1080,15 +1332,6 @@ fn read_user_env(key: &str) -> Result<Option<String>, String> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("无法读取 {key}：{error}")),
     }
-}
-
-fn write_user_env(key: &str, value: String) -> Result<(), String> {
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let (env, _) = hkcu
-        .create_subkey("Environment")
-        .map_err(|error| format!("无法打开用户环境变量注册表：{error}"))?;
-    env.set_value(key, &value)
-        .map_err(|error| format!("无法写入 {key}：{error}"))
 }
 
 fn delete_user_env(key: &str) -> Result<(), String> {
@@ -1118,7 +1361,7 @@ fn broadcast_environment_change() {
             0,
             message.as_ptr() as isize,
             SMTO_ABORTIFHUNG,
-            5000,
+            ENVIRONMENT_BROADCAST_TIMEOUT_MS,
             &mut result as *mut usize,
         );
     }
@@ -1132,6 +1375,96 @@ fn path_to_string(path: &Path) -> Result<String, String> {
 
 fn format_io_error(error: io::Error) -> String {
     error.to_string()
+}
+
+#[cfg(test)]
+mod usage_scanner_tests {
+    use super::modules::usage_scanner;
+    use std::path::PathBuf;
+
+    fn userprofile() -> Option<PathBuf> {
+        std::env::var_os("USERPROFILE").map(PathBuf::from)
+    }
+
+    fn real_session_path() -> Option<PathBuf> {
+        let up = userprofile()?;
+        let p = up.join(r".codex\sessions\2026\07\07\rollout-2026-07-07T16-55-49-019f3bca-6d8b-7053-acab-5d7112efc164.jsonl");
+        if p.exists() {
+            Some(p)
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn parses_real_session_file() {
+        let Some(path) = real_session_path() else {
+            eprintln!("[skip] real session file not found");
+            return;
+        };
+        let home_str = r"C:\Users\frank\.codex";
+
+        let result = usage_scanner::scan_session_file(
+            home_str,
+            &path,
+            "019f3bca-6d8b-7053-acab-5d7112efc164",
+            0,
+            &[(0, "test-profile".to_string())],
+        )
+        .expect("scan should succeed");
+
+        assert!(!result.new_records.is_empty(), "should have records");
+        let r = &result.new_records[0];
+        assert_eq!(r.session_id, "019f3bca-6d8b-7053-acab-5d7112efc164");
+        assert!(r.input_tokens > 0);
+        assert!(r.total_tokens > 0);
+        assert_eq!(r.plan_type.as_deref(), Some("free"));
+        assert!(r.primary_used_percent.is_some());
+    }
+
+    #[test]
+    fn incremental_scan_skips_already_read() {
+        let Some(path) = real_session_path() else {
+            return;
+        };
+        let home_str = r"C:\Users\frank\.codex";
+
+        let r1 = usage_scanner::scan_session_file(
+            home_str,
+            &path,
+            "test",
+            0,
+            &[(0, "test-profile".to_string())],
+        )
+        .expect("first scan ok");
+        let offset = r1.new_offset;
+        assert!(offset > 0);
+
+        let r2 = usage_scanner::scan_session_file(
+            home_str,
+            &path,
+            "test",
+            offset,
+            &[(0, "test-profile".to_string())],
+        )
+        .expect("second scan ok");
+        assert_eq!(r2.new_records.len(), 0);
+        assert_eq!(r2.new_offset, offset);
+    }
+
+    #[test]
+    fn walks_session_files() {
+        let Some(up) = userprofile() else { return };
+        let home = up.join(".codex");
+        let files = usage_scanner::walk_session_files(&home).expect("walk ok");
+        if files.is_empty() {
+            eprintln!("[skip] no session files in current default Codex Home");
+            return;
+        }
+        assert!(files
+            .iter()
+            .all(|path| path.extension().is_some_and(|ext| ext == "jsonl")));
+    }
 }
 
 #[cfg(test)]
@@ -1172,6 +1505,130 @@ mod tests {
     }
 }
 
+// region: usage commands
+use crate::models::usage::UsageGranularity;
+use crate::modules::usage_db::{self as usage_db_mod, UsageDb};
+use crate::modules::usage_scanner as usage_scanner_mod;
+
+fn open_usage_db(app: &AppHandle) -> Result<UsageDb, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("无法获取应用数据目录: {}", e))?;
+    let db_path = dir.join("usage.db");
+    UsageDb::open(&db_path)
+}
+
+fn build_usage_profile_map(data: &StoredData) -> Vec<(String, String, String)> {
+    data.profiles
+        .iter()
+        .map(|p| (p.home_path.clone(), p.id.clone(), p.name.clone()))
+        .collect()
+}
+
+#[tauri::command]
+fn scan_usage(app: AppHandle) -> Result<crate::models::usage::UsageSummary, String> {
+    let data = load_data(&app)?;
+    let profiles = build_usage_profile_map(&data);
+    let mut homes: Vec<String> = profiles.iter().map(|(h, _, _)| h.clone()).collect();
+    homes.sort();
+    homes.dedup();
+
+    let mut db = open_usage_db(&app)?;
+    let mut total_new = 0usize;
+    let mut errors: Vec<String> = Vec::new();
+
+    for home in &homes {
+        let path = std::path::Path::new(home);
+        let session_files = match usage_scanner_mod::walk_session_files(path) {
+            Ok(v) => v,
+            Err(e) => {
+                errors.push(format!("{}: {}", home, e));
+                continue;
+            }
+        };
+        for sf in session_files {
+            let hint = sf
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.split("rollout-").nth(1))
+                .unwrap_or("unknown")
+                .to_string();
+            let start_offset = db.get_scan_offset(home, &hint).unwrap_or(0) as u64;
+            let profile_launches = db.list_profile_launches(home)?;
+            match usage_scanner_mod::scan_session_file(
+                home,
+                &sf,
+                &hint,
+                start_offset,
+                &profile_launches,
+            ) {
+                Ok(result) => {
+                    let inserted = db.insert_records(&result.new_records)?;
+                    total_new += inserted;
+                    db.update_scan_offset(home, &hint, result.new_offset as i64)?;
+                }
+                Err(e) => {
+                    errors.push(format!("{}: {}", sf.display(), e));
+                }
+            }
+        }
+    }
+
+    let profile_map = usage_db_mod::build_profile_map(&profiles);
+    let summary = db.compute_summary(&profile_map)?;
+    if !errors.is_empty() {
+        eprintln!("[usage] scan warnings: {}", errors.join("; "));
+    }
+    if total_new > 0 {
+        eprintln!("[usage] inserted {} new records", total_new);
+    }
+    Ok(summary)
+}
+
+#[tauri::command]
+fn get_usage_summary(app: AppHandle) -> Result<crate::models::usage::UsageSummary, String> {
+    let data = load_data(&app)?;
+    let profiles = build_usage_profile_map(&data);
+    let db = open_usage_db(&app)?;
+    let profile_map = usage_db_mod::build_profile_map(&profiles);
+    db.compute_summary(&profile_map)
+}
+
+#[tauri::command]
+fn get_usage_buckets(
+    app: AppHandle,
+    granularity: UsageGranularity,
+    since: Option<i64>,
+    until: Option<i64>,
+    profile_id: Option<String>,
+) -> Result<Vec<crate::models::usage::UsageBucket>, String> {
+    let profile_filter = profile_id.as_deref();
+    let db = open_usage_db(&app)?;
+    db.compute_buckets(granularity, since, until, profile_filter)
+}
+
+#[tauri::command]
+fn get_usage_sessions(
+    app: AppHandle,
+    profile_id: Option<String>,
+    limit: Option<i64>,
+) -> Result<Vec<crate::models::usage::SessionInfo>, String> {
+    let data = load_data(&app)?;
+    let profiles = build_usage_profile_map(&data);
+    let profile_map = usage_db_mod::build_profile_map(&profiles);
+    let profile_filter = profile_id.as_deref();
+    let db = open_usage_db(&app)?;
+    db.list_sessions(&profile_map, profile_filter, limit.unwrap_or(20))
+}
+
+#[tauri::command]
+fn clear_usage_data(app: AppHandle, before: i64) -> Result<usize, String> {
+    let mut db = open_usage_db(&app)?;
+    db.clear_before(before)
+}
+// endregion: usage commands
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -1179,6 +1636,11 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             get_app_state,
+            scan_usage,
+            get_usage_summary,
+            get_usage_buckets,
+            get_usage_sessions,
+            clear_usage_data,
             create_profile,
             update_profile,
             delete_profile,
@@ -1188,10 +1650,15 @@ fn main() {
             inspect_profile,
             test_profile_connection,
             test_login_connection,
+            test_proxy_connection,
             launch_codex,
+            list_codex_instances,
+            stop_codex_instance,
             reveal_profile_folder,
             save_settings,
             is_codex_process_running,
+            get_shared_resources,
+            save_shared_agents,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
