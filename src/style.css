@@ -1281,3 +1281,203 @@ code {
     grid-template-columns: 1fr;
   }
 }
+
+.app-loading {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+  min-height: 100vh;
+}
+
+.loading-toast {
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  bottom: 22px;
+  box-shadow: 0 16px 42px rgba(15, 23, 42, .2);
+  color: var(--text);
+  padding: 12px 15px;
+  position: fixed;
+  right: 22px;
+  z-index: 30;
+}
+
+.loading-indicator {
+  align-items: center;
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 800;
+  gap: 10px;
+}
+
+.spinner {
+  animation: spin 750ms linear infinite;
+  border: 2px solid rgba(36, 120, 255, .2);
+  border-radius: 50%;
+  border-top-color: var(--blue);
+  height: 18px;
+  width: 18px;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation-duration: 1400ms; }
+}
+
+.resource-card {
+  overflow: hidden;
+  position: relative;
+}
+
+.resource-card-kicker {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  font-size: 11px;
+  font-weight: 900;
+  gap: 8px;
+  letter-spacing: .06em;
+  margin-bottom: 14px;
+  text-transform: uppercase;
+}
+
+.resource-icon {
+  align-items: center;
+  background: var(--blue-soft);
+  border-radius: 10px;
+  color: var(--blue);
+  display: inline-flex;
+  height: 30px;
+  justify-content: center;
+  width: 30px;
+}
+
+.resource-icon.skills {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.skill-card-grid {
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+}
+
+.skill-row {
+  display: grid;
+  gap: 8px;
+  min-height: 138px;
+}
+
+.skill-row strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.skill-row code {
+  align-self: end;
+  font-size: 10px;
+}
+
+.resource-loading {
+  display: grid;
+  min-height: 260px;
+  place-items: center;
+}
+
+.update-summary {
+  background: rgba(248, 251, 255, .78);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 13px;
+}
+
+.update-summary.available {
+  border-color: rgba(36, 120, 255, .36);
+}
+
+.update-summary span,
+.update-summary time {
+  color: var(--muted);
+  display: block;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.update-summary strong {
+  color: var(--text);
+  display: block;
+  font-size: 15px;
+  margin-top: 4px;
+}
+
+.update-summary time,
+.release-notes {
+  grid-column: 1 / -1;
+}
+
+.release-notes p {
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.65;
+  margin-top: 6px;
+  white-space: pre-wrap;
+}
+
+:root[data-theme="dark"] {
+  background: #0d1420;
+  color: #e5edf8;
+  --bg: #0d1420;
+  --bg-glow: #101d25;
+  --panel: rgba(24, 34, 49, .9);
+  --panel-strong: #1b2636;
+  --text: #e5edf8;
+  --muted: #93a4bb;
+  --line: rgba(148, 163, 184, .22);
+  --blue-soft: rgba(36, 120, 255, .18);
+  --green-soft: rgba(18, 185, 129, .16);
+  --cyan-soft: rgba(14, 165, 198, .16);
+  --purple-soft: rgba(124, 58, 237, .16);
+  --mint-soft: rgba(15, 159, 131, .16);
+  --shadow-card: 0 18px 45px rgba(0, 0, 0, .24);
+  --shadow-soft: 0 10px 28px rgba(0, 0, 0, .2);
+}
+
+:root[data-theme="dark"] body::before {
+  background: radial-gradient(circle at 18% 18%, rgba(36, 120, 255, .11), transparent 28%), linear-gradient(135deg, #111a28, var(--bg));
+}
+
+:root[data-theme="dark"] :is(.side-rail, .stat-card, .overview-card, .panel, .confirm-dialog) {
+  border-color: rgba(148, 163, 184, .16);
+}
+
+:root[data-theme="dark"] :is(button, input, .secondary-action, .profile-item, .profile-card, .env-card, .active-profile, .facts div, .about-facts div, .usage-facts div, .usage-profile-card, .usage-session-row, .skill-row, .instance-row, .settings-toggle, .route-card, .update-summary) {
+  background: rgba(28, 40, 57, .86);
+  border-color: rgba(148, 163, 184, .2);
+  color: var(--text);
+}
+
+:root[data-theme="dark"] :is(button:hover:not(:disabled), .profile-item:hover, .profile-item.active, .profile-card:hover, .profile-card.active, .segmented button.active, .provider-option.active) {
+  background: #243247;
+}
+
+:root[data-theme="dark"] :is(h1, h2, .profile-copy strong, .active-profile strong, .facts dd, .about-facts dd, .usage-facts dd, .usage-profile-card dd, .usage-session-row dd, .login-option strong, .provider-option strong) {
+  color: var(--text);
+}
+
+:root[data-theme="dark"] :is(label, .field-block, .secondary-action, .confirm-details, .profile-card-footer) {
+  color: #b0bfd2;
+}
+
+:root[data-theme="dark"] :is(code, .agents-editor, .segmented, .confirm-details) {
+  background: rgba(12, 20, 31, .72);
+  border-color: rgba(148, 163, 184, .18);
+  color: #c8d5e5;
+}
+
+@media (max-width: 760px) {
+  .loading-toast { bottom: 14px; left: 14px; right: 14px; }
+  .skill-card-grid { grid-template-columns: 1fr; }
+}

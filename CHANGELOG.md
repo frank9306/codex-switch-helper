@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.4 - 2026-07-17
+
+- Added a Windows system tray with show and quit actions; closing the main window now keeps the helper available from the tray.
+- Added Windows login startup and persistent Light/Dark theme settings.
+- Added visible loading feedback for Profile, usage, resource, settings, and update operations.
+- Redesigned Shared Resources with stronger AGENTS.md and Skill card hierarchy.
+- Expanded update checks with current/latest versions, release date, and release notes.
+- Preserved Profile Home `config.toml` changes, including manually installed MCP servers, instead of overwriting them with a stale saved snapshot at launch.
+
 ## 0.2.3 - 2026-07-17
 
 - Kept the helper responsive while Codex tasks update large Profile Homes by moving recursive Profile inspection off the Tauri event thread and preventing overlapping refreshes.

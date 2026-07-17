@@ -17,7 +17,11 @@ use std::{
     process::Command,
     sync::{Mutex, OnceLock},
 };
-use tauri::{AppHandle, Manager};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Manager, WindowEvent,
+};
 use uuid::Uuid;
 use winreg::{enums::HKEY_CURRENT_USER, RegKey};
 
@@ -28,6 +32,8 @@ const HTTP_PROXY_ENV_KEY: &str = "HTTP_PROXY";
 const HTTPS_PROXY_ENV_KEY: &str = "HTTPS_PROXY";
 const ALL_PROXY_ENV_KEY: &str = "ALL_PROXY";
 const DATA_FILE_OVERRIDE_ENV_KEY: &str = "CODEX_SWITCH_HELPER_DATA_FILE";
+const AUTOSTART_REGISTRY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+const AUTOSTART_VALUE_NAME: &str = "Codex Switch Helper";
 
 const CODEX_PROCESS_NAME: &str = "Codex.exe";
 const CODEX_CONFIG_FILENAME: &str = "config.toml";
@@ -114,6 +120,10 @@ struct AppSettings {
     proxy_host: String,
     #[serde(default)]
     proxy_port: String,
+    #[serde(default)]
+    launch_at_startup: bool,
+    #[serde(default = "default_theme")]
+    theme: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,6 +202,8 @@ impl Default for AppSettings {
             proxy_protocol: default_proxy_protocol(),
             proxy_host: String::new(),
             proxy_port: String::new(),
+            launch_at_startup: false,
+            theme: default_theme(),
         }
     }
 }
@@ -507,10 +519,7 @@ fn launch_codex_blocking(app: AppHandle, profile_id: String) -> Result<CodexInst
 
     let home_path = PathBuf::from(&data.profiles[profile_index].home_path);
     fs::create_dir_all(&home_path).map_err(format_io_error)?;
-    if let Some(config_toml) = data.profiles[profile_index].config_toml.as_deref() {
-        let config_toml = rewrite_shared_paths_to_home(&app, config_toml, &home_path)?;
-        fs::write(home_path.join(CODEX_CONFIG_FILENAME), config_toml).map_err(format_io_error)?;
-    }
+    seed_profile_config_if_missing(&app, &data.profiles[profile_index], &home_path)?;
     if let Some(config_toml) = migrate_home_config_paths(&app, &home_path)? {
         data.profiles[profile_index].config_toml = Some(config_toml);
     }
@@ -611,6 +620,8 @@ fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
         return Err("Codex AppID 不能为空。".to_string());
     }
     validate_proxy_settings(&settings)?;
+    validate_theme(&settings.theme)?;
+    set_launch_at_startup(settings.launch_at_startup)?;
     apply_proxy_settings_to_current_process(&settings)?;
 
     let mut data = load_data(&app)?;
@@ -622,8 +633,50 @@ fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
         proxy_protocol: settings.proxy_protocol.trim().to_string(),
         proxy_host: settings.proxy_host.trim().to_string(),
         proxy_port: settings.proxy_port.trim().to_string(),
+        launch_at_startup: settings.launch_at_startup,
+        theme: settings.theme.trim().to_string(),
     };
     save_data(&app, &data)
+}
+
+fn default_theme() -> String {
+    "light".to_string()
+}
+
+fn validate_theme(theme: &str) -> Result<(), String> {
+    if matches!(theme.trim(), "light" | "dark") {
+        Ok(())
+    } else {
+        Err("主题只能是 light 或 dark。".to_string())
+    }
+}
+
+#[cfg(windows)]
+fn set_launch_at_startup(enabled: bool) -> Result<(), String> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (key, _) = hkcu
+        .create_subkey(AUTOSTART_REGISTRY_PATH)
+        .map_err(|error| format!("无法打开开机启动注册表项：{error}"))?;
+    if enabled {
+        let executable = env::current_exe().map_err(format_io_error)?;
+        key.set_value(
+            AUTOSTART_VALUE_NAME,
+            &format!("\"{}\"", executable.display()),
+        )
+        .map_err(|error| format!("无法启用开机启动：{error}"))?;
+    } else {
+        match key.delete_value(AUTOSTART_VALUE_NAME) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("无法关闭开机启动：{error}")),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn set_launch_at_startup(_enabled: bool) -> Result<(), String> {
+    Err("开机启动设置目前仅支持 Windows。".to_string())
 }
 
 #[tauri::command]
@@ -956,6 +1009,30 @@ fn read_config_toml(source_path: &Path) -> Result<Option<String>, String> {
     fs::read_to_string(config_path)
         .map(Some)
         .map_err(format_io_error)
+}
+
+fn seed_profile_config_if_missing(
+    app: &AppHandle,
+    profile: &Profile,
+    codex_home: &Path,
+) -> Result<(), String> {
+    let config_path = codex_home.join(CODEX_CONFIG_FILENAME);
+    if config_path.is_file() {
+        return Ok(());
+    }
+
+    if let Some(config_toml) = profile.config_toml.as_deref() {
+        let config_toml = rewrite_shared_paths_to_home(app, config_toml, codex_home)?;
+        seed_config_file_if_missing(&config_path, &config_toml)?;
+    }
+    Ok(())
+}
+
+fn seed_config_file_if_missing(config_path: &Path, config_toml: &str) -> Result<(), String> {
+    if !config_path.is_file() {
+        fs::write(config_path, config_toml).map_err(format_io_error)?;
+    }
+    Ok(())
 }
 
 fn with_file_auth_credentials_store(config_toml: &str) -> String {
@@ -1811,6 +1888,32 @@ mod tests {
     }
 
     #[test]
+    fn existing_profile_config_is_not_replaced_by_saved_snapshot() {
+        let home = env::temp_dir().join(format!("codex-profile-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&home).unwrap();
+        let config_path = home.join(CODEX_CONFIG_FILENAME);
+        let current = "[mcp_servers.browser]\ncommand = \"browser\"\n";
+        fs::write(&config_path, current).unwrap();
+
+        let profile = Profile {
+            config_toml: Some("model = \"stale-snapshot\"\n".to_string()),
+            ..account_profile(&home)
+        };
+
+        seed_config_file_if_missing(&config_path, profile.config_toml.as_deref().unwrap()).unwrap();
+
+        assert_eq!(fs::read_to_string(config_path).unwrap(), current);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn settings_accept_only_supported_themes() {
+        assert!(validate_theme("light").is_ok());
+        assert!(validate_theme("dark").is_ok());
+        assert!(validate_theme("system").is_err());
+    }
+
+    #[test]
     fn account_profile_can_launch_before_first_login() {
         let home = env::temp_dir().join(format!("codex-profile-test-{}", Uuid::new_v4()));
         let profile = account_profile(&home);
@@ -1962,6 +2065,43 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .setup(|app| {
+            let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let mut tray = TrayIconBuilder::new()
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .tooltip("Codex Switch Helper")
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => show_main_window(app),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if matches!(
+                        event,
+                        TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        }
+                    ) {
+                        show_main_window(tray.app_handle());
+                    }
+                });
+            if let Some(icon) = app.default_window_icon() {
+                tray = tray.icon(icon.clone());
+            }
+            tray.build(app)?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             get_app_state,
             scan_usage,
@@ -1990,4 +2130,12 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
 }

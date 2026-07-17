@@ -12,6 +12,7 @@ type ApiProvider = 'openai' | 'minimax' | 'deepseek' | 'custom'
 type Mode = 'detail' | 'new' | 'edit'
 type ActiveMenu = 'profiles' | 'resources' | 'usage' | 'settings' | 'about'
 type ProxyProtocol = 'http' | 'socks5'
+type Theme = 'light' | 'dark'
 
 type ConfirmIntent = 'danger' | 'warning'
 
@@ -81,6 +82,16 @@ type AppSettings = {
   proxyProtocol: ProxyProtocol
   proxyHost: string
   proxyPort: string
+  launchAtStartup: boolean
+  theme: Theme
+}
+
+type UpdateInfo = {
+  currentVersion: string
+  latestVersion?: string
+  releaseDate?: string
+  notes?: string
+  available: boolean
 }
 
 type AppState = {
@@ -186,12 +197,16 @@ function App() {
   const [proxyProtocol, setProxyProtocol] = useState<ProxyProtocol>('http')
   const [proxyHost, setProxyHost] = useState('')
   const [proxyPort, setProxyPort] = useState('')
+  const [launchAtStartup, setLaunchAtStartup] = useState(false)
+  const [theme, setTheme] = useState<Theme>('light')
   const [detectedCodexAppId, setDetectedCodexAppId] = useState<string | null>(null)
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
   const [appVersion, setAppVersion] = useState('')
   const [updateBusy, setUpdateBusy] = useState(false)
   const [updateProgress, setUpdateProgress] = useState('')
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
+  const [loadingLabel, setLoadingLabel] = useState('')
   const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null)
   const [usageSessions, setUsageSessions] = useState<UsageSessionInfo[]>([])
   const [usageBusy, setUsageBusy] = useState(false)
@@ -210,6 +225,8 @@ function App() {
     setProxyProtocol(nextState.settings.proxyProtocol || 'http')
     setProxyHost(nextState.settings.proxyHost || '')
     setProxyPort(nextState.settings.proxyPort || '')
+    setLaunchAtStartup(Boolean(nextState.settings.launchAtStartup))
+    setTheme(nextState.settings.theme || 'light')
     setSelectedProfileId((current) => current || nextState.activeProfileId || nextState.profiles[0]?.id || '')
     return nextState
   }
@@ -222,9 +239,18 @@ function App() {
     try {
       const update = await check()
       if (!update) {
+        setUpdateInfo({ currentVersion: appVersion, available: false })
         if (!silent) setMessage('当前已是最新版本。')
         return
       }
+
+      setUpdateInfo({
+        currentVersion: update.currentVersion || appVersion,
+        latestVersion: update.version,
+        releaseDate: update.date,
+        notes: update.body,
+        available: true,
+      })
 
       setUpdateBusy(false)
       requestConfirm({
@@ -232,7 +258,12 @@ function App() {
         body: '安装完成后应用会自动重启。',
         confirmLabel: '下载并安装',
         intent: 'warning',
-        details: ['下载更新包', '安装新版本', '重启应用'],
+        details: [
+          `当前版本：${update.currentVersion || appVersion || '未知'}`,
+          `新版本：${update.version}`,
+          ...(update.body ? update.body.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(0, 6) : []),
+          '安装完成后重启应用',
+        ],
         onConfirm: async () => {
           setUpdateBusy(true)
           try {
@@ -291,6 +322,11 @@ function App() {
       })
       .catch((error) => setMessage(String(error)))
   }, [])
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    document.documentElement.style.colorScheme = theme
+  }, [theme])
 
   useEffect(() => {
     if (activeMenu !== 'settings' || !state || codexAppIdDetectionStarted.current) return
@@ -408,8 +444,9 @@ function App() {
     }
   }
 
-  async function runAction(action: () => Promise<string | void>) {
+  async function runAction(action: () => Promise<string | void>, label = '正在处理...') {
     setBusy(true)
+    setLoadingLabel(label)
     setMessage('')
     try {
       const result = await action()
@@ -419,6 +456,7 @@ function App() {
       setMessage(String(error))
     } finally {
       setBusy(false)
+      setLoadingLabel('')
     }
   }
 
@@ -467,7 +505,7 @@ function App() {
       setSelectedProfileId(profile.id)
       setMode('detail')
       return `已保存 Profile：${profile.name}`
-    })
+    }, mode === 'new' ? '正在创建 Profile...' : '正在保存 Profile...')
   }
 
 
@@ -475,7 +513,7 @@ function App() {
     await runAction(async () => {
       const result = await invoke<ConnectionTestResult>('test_profile_connection', { profileId })
       return result.ok ? `连通测试通过：${result.endpoint}` : `连通测试失败：HTTP ${result.status}，${result.endpoint}`
-    })
+    }, '正在测试连接...')
   }
 
   async function testLoginForm() {
@@ -488,7 +526,7 @@ function App() {
         apiBaseUrl: formAuthMode === 'apiKey' ? formApiBaseUrl : null,
       })
       return result.ok ? `连通测试通过：${result.endpoint}` : `连通测试失败：HTTP ${result.status}，${result.endpoint}`
-    })
+    }, '正在测试连接...')
   }
 
   async function launchProfile(profileId: string) {
@@ -504,7 +542,7 @@ function App() {
           await invoke<CodexInstance>('launch_codex', { profileId })
           setInstances(await invoke<CodexInstance[]>('list_codex_instances'))
           return '已启动独立 Codex 实例。'
-        })
+        }, `正在启动 ${profile?.name || 'Profile'}...`)
       },
     })
   }
@@ -520,7 +558,7 @@ function App() {
         await runAction(async () => {
           await invoke('launch_default_codex')
           return '已按当前系统环境默认启动 Codex；本程序代理不会应用到 Codex。'
-        })
+        }, '正在启动 Codex...')
       },
     })
   }
@@ -537,7 +575,7 @@ function App() {
           await invoke('clear_codex_home')
           setSelectedProfileId('')
           return '已清除用户级 CODEX_HOME。手动启动 Codex 将使用默认 Home。'
-        })
+        }, '正在恢复默认 Home...')
       },
     })
   }
@@ -548,9 +586,13 @@ function App() {
       body: '这些设置会影响本程序网络请求和后续 Codex 启动方式。',
       confirmLabel: '保存设置',
       intent: 'warning',
-      details: proxyEnabled
-        ? [`本程序立即使用代理：${proxyProtocol}://${proxyHost}:${proxyPort}`, '后续 Codex 实例使用此代理']
-        : ['本程序立即停止使用代理', '后续 Codex 实例不注入代理'],
+      details: [
+        ...(proxyEnabled
+          ? [`本程序立即使用代理：${proxyProtocol}://${proxyHost}:${proxyPort}`, '后续 Codex 实例使用此代理']
+          : ['本程序立即停止使用代理', '后续 Codex 实例不注入代理']),
+        launchAtStartup ? '启用登录 Windows 后自动启动' : '关闭登录 Windows 后自动启动',
+        `界面主题：${theme === 'dark' ? 'Dark' : 'Light'}`,
+      ],
       onConfirm: async () => {
         await runAction(async () => {
           await invoke('save_settings', {
@@ -562,10 +604,12 @@ function App() {
               proxyProtocol,
               proxyHost,
               proxyPort,
+              launchAtStartup,
+              theme,
             },
           })
           return '设置已保存。'
-        })
+        }, '正在保存设置...')
       },
     })
   }
@@ -573,7 +617,7 @@ function App() {
   async function revealProfile(profileId: string) {
     await runAction(async () => {
       await invoke('reveal_profile_folder', { profileId })
-    })
+    }, '正在打开目录...')
   }
 
   async function refreshUsage(scan: boolean) {
@@ -600,7 +644,7 @@ function App() {
       const next = await invoke<SharedResources>('get_shared_resources')
       setResources(next)
       return 'AGENTS.md 已保存。'
-    })
+    }, '正在保存共享资源...')
   }
 
   async function stopInstance(pid: number) {
@@ -608,7 +652,7 @@ function App() {
       await invoke('stop_codex_instance', { pid })
       setInstances(await invoke<CodexInstance[]>('list_codex_instances'))
       return `已停止实例 PID ${pid}。`
-    })
+    }, '正在停止 Codex 实例...')
   }
 
   async function deleteProfile(profile: Profile) {
@@ -626,13 +670,13 @@ function App() {
           setMode('detail')
           setSelectedProfileId('')
           return `已删除 Profile：${profile.name}`
-        })
+        }, '正在删除 Profile...')
       },
     })
   }
 
   if (!state) {
-    return <main className="shell">加载中...</main>
+    return <main className="app-loading"><LoadingIndicator label="正在加载应用配置..." /></main>
   }
 
   const formIsValid =
@@ -911,6 +955,17 @@ function App() {
                 <h2>高级启动设置</h2>
                 <p>AppID 会自动扫描。扫描不到或启动失败时，再手动修改。</p>
               </div>
+              <label className="toggle-row settings-toggle">
+                <input type="checkbox" checked={launchAtStartup} onChange={(event) => setLaunchAtStartup(event.target.checked)} />
+                <span>登录 Windows 后自动启动</span>
+              </label>
+              <div className="field-block">
+                <span>界面主题</span>
+                <div className="segmented theme-segmented">
+                  <button className={theme === 'light' ? 'active' : ''} onClick={() => setTheme('light')} type="button">Light</button>
+                  <button className={theme === 'dark' ? 'active' : ''} onClick={() => setTheme('dark')} type="button">Dark</button>
+                </div>
+              </div>
               <label>
                 <span>Codex AppID</span>
                 <input value={codexAppId} onChange={(event) => setCodexAppId(event.target.value)} />
@@ -955,6 +1010,20 @@ function App() {
                   <p>启动时会自动检查一次，也可以在这里手动检查。</p>
                 </div>
                 {updateProgress && <p className="hint">{updateProgress}</p>}
+                {updateInfo && (
+                  <div className={`update-summary ${updateInfo.available ? 'available' : ''}`}>
+                    <div>
+                      <span>当前版本</span>
+                      <strong>{updateInfo.currentVersion || appVersion || '未知'}</strong>
+                    </div>
+                    <div>
+                      <span>{updateInfo.available ? '可用版本' : '更新状态'}</span>
+                      <strong>{updateInfo.available ? updateInfo.latestVersion : '已是最新'}</strong>
+                    </div>
+                    {updateInfo.releaseDate && <time>{new Date(updateInfo.releaseDate).toLocaleString()}</time>}
+                    {updateInfo.notes && <div className="release-notes"><span>版本内容</span><p>{updateInfo.notes}</p></div>}
+                  </div>
+                )}
                 <button className="secondary-action full-width" disabled={updateBusy} onClick={() => checkForUpdate(false)} type="button">
                   {updateBusy ? '检查中...' : '检查更新'}
                 </button>
@@ -972,6 +1041,11 @@ function App() {
           onConfirm={confirmAndClose}
         />
       )}
+      {(busy || usageBusy || updateBusy) && (
+        <div className="loading-toast" role="status" aria-live="polite">
+          <LoadingIndicator label={loadingLabel || (usageBusy ? '正在读取用量...' : updateProgress || '正在检查更新...')} />
+        </div>
+      )}
     </main>
   )
 }
@@ -983,9 +1057,13 @@ function ResourcesPanel(props: {
   onChange: (value: string) => void
   onSave: () => void
 }) {
+  if (!props.resources) {
+    return <section className="panel resource-loading"><LoadingIndicator label="正在读取共享资源..." /></section>
+  }
   return (
     <section className="resources-grid">
-      <section className="panel resource-editor">
+      <section className="panel resource-editor resource-card">
+        <div className="resource-card-kicker"><span className="resource-icon">A</span><span>全局指令</span></div>
         <div className="panel-header">
           <div className="section-title">
             <h2>AGENTS.md</h2>
@@ -1003,12 +1081,13 @@ function ResourcesPanel(props: {
           value={props.draft}
         />
       </section>
-      <section className="panel skills-panel">
+      <section className="panel skills-panel resource-card">
+        <div className="resource-card-kicker"><span className="resource-icon skills">S</span><span>{props.resources?.skills.length || 0} 个 Skills</span></div>
         <div className="section-title">
           <h2>Skills</h2>
           <code>{props.resources?.skillsPath || '~/.agents/skills'}</code>
         </div>
-        <div className="skills-list">
+        <div className="skills-list skill-card-grid">
           {props.resources?.skills.length ? props.resources.skills.map((skill) => (
             <article className="skill-row" key={skill.path}>
               <strong>{skill.name}</strong>
@@ -1020,6 +1099,10 @@ function ResourcesPanel(props: {
       </section>
     </section>
   )
+}
+
+function LoadingIndicator(props: { label: string }) {
+  return <span className="loading-indicator"><span className="spinner" aria-hidden="true" />{props.label}</span>
 }
 
 function UsageDashboard(props: {

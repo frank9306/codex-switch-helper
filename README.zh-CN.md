@@ -22,6 +22,8 @@
 - Profile 实例通过安装包声明的 Codex 桌面入口启动，默认实例仍通过 `shell:AppsFolder` 启动。
 - 可以删除用户级 `CODEX_HOME`，恢复 Codex 默认 Home 行为。
 - 通过发布到 GitHub Releases 的 Tauri 签名更新产物检查和安装应用更新。
+- 支持 Windows 系统托盘、登录 Windows 后自动启动，以及持久化的 Light/Dark 主题。
+- 耗时操作会显示明确进度；发现更新时会展示当前版本、目标版本、发布日期和版本内容。
 
 ## Profile 隔离
 
@@ -45,7 +47,7 @@
 
 ## 设置和代理
 
-设置页面包含 Codex 启动设置和代理设置。
+设置页面包含 Codex 启动设置、代理设置、登录 Windows 后自动启动和 Light/Dark 主题选择。
 
 - 代理支持 `http` 和 `socks5`。
 - 保存代理后，本工具会立即使用该代理。
@@ -87,7 +89,7 @@ Windows 上 Tauri/Rust 需要 Visual Studio Build Tools C++ 工具链。如果 `
 
 ## 应用更新
 
-应用启动时会检查 GitHub Releases 上的签名更新元数据，也可以在关于面板手动检查更新。
+应用启动时会检查 GitHub Releases 上的签名更新元数据，也可以在关于面板手动检查更新。发现新版本时，会在安装前展示当前版本、目标版本、发布日期和版本内容。
 
 发布支持自动更新的版本前，需要添加这些 GitHub 仓库 secrets：
 
@@ -111,4 +113,4 @@ npm run tauri:build
 
 发布前必须更新 `CHANGELOG.md`、`README.md` 和 `README.zh-CN.md`。
 
-当前版本：`0.2.3`。
+当前版本：`0.2.4`。

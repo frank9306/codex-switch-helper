@@ -1,6 +1,6 @@
 [package]
 name = "codex-switch-helper"
-version = "0.2.3"
+version = "0.2.4"
 description = "Codex profile switch helper"
 authors = ["frank"]
 edition = "2021"
@@ -13,7 +13,7 @@ chrono = { version = "0.4.42", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 rusqlite = { version = "0.32", features = ["bundled"] }
-tauri = { version = "2.9.5", features = [] }
+tauri = { version = "=2.11.4", features = ["tray-icon"] }
 tauri-plugin-dialog = "2.4.1"
 uuid = { version = "1.19.0", features = ["v4"] }
 winreg = "0.55.0"

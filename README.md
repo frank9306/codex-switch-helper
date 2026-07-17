@@ -22,6 +22,8 @@ Tauri desktop helper for switching Codex App profiles on Windows.
 - Launches Profile instances through the packaged Codex desktop entry point and default instances through `shell:AppsFolder`.
 - Can restore default Codex Home behavior by deleting user-level `CODEX_HOME`.
 - Checks for app updates through signed Tauri updater artifacts published on GitHub Releases.
+- Runs from the Windows system tray, supports launch at Windows login, and offers persistent Light/Dark themes.
+- Shows progress for long-running operations and displays version details and release notes when updates are available.
 
 ## Profile Isolation
 
@@ -45,7 +47,7 @@ Tauri desktop helper for switching Codex App profiles on Windows.
 
 ## Settings And Proxy
 
-The settings page contains Codex launch settings and proxy settings.
+The settings page contains Codex launch settings, proxy settings, Windows login startup, and Light/Dark theme selection.
 
 - Proxy supports `http` and `socks5`.
 - Saving proxy settings applies them to this helper app immediately.
@@ -87,7 +89,7 @@ On Windows, Rust/Tauri requires the Visual Studio Build Tools C++ toolchain. If 
 
 ## App Updates
 
-The app checks GitHub Releases for signed updater metadata at startup and also provides a manual update check in the About panel.
+The app checks GitHub Releases for signed updater metadata at startup and also provides a manual update check in the About panel. Available updates show the installed version, target version, release date, and release notes before installation.
 
 Before publishing updater-enabled releases, add these repository secrets:
 
@@ -111,4 +113,4 @@ npm run tauri:build
 
 Also update `CHANGELOG.md`, `README.md`, and `README.zh-CN.md` before tagging a release.
 
-Current release: `0.2.3`.
+Current release: `0.2.4`.
