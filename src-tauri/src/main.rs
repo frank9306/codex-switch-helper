@@ -419,7 +419,16 @@ fn clear_codex_home(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn inspect_profile(app: AppHandle, profile_id: String) -> Result<ProfileInspection, String> {
+async fn inspect_profile(app: AppHandle, profile_id: String) -> Result<ProfileInspection, String> {
+    tauri::async_runtime::spawn_blocking(move || inspect_profile_blocking(app, profile_id))
+        .await
+        .map_err(|error| format!("Profile 检查任务失败：{error}"))?
+}
+
+fn inspect_profile_blocking(
+    app: AppHandle,
+    profile_id: String,
+) -> Result<ProfileInspection, String> {
     let data = load_data(&app)?;
     let profile = find_profile(&data, &profile_id)?;
     let home = Path::new(&profile.home_path);
@@ -482,7 +491,13 @@ fn test_proxy_connection(settings: AppSettings) -> Result<ConnectionTestResult, 
 }
 
 #[tauri::command]
-fn launch_codex(app: AppHandle, profile_id: String) -> Result<CodexInstance, String> {
+async fn launch_codex(app: AppHandle, profile_id: String) -> Result<CodexInstance, String> {
+    tauri::async_runtime::spawn_blocking(move || launch_codex_blocking(app, profile_id))
+        .await
+        .map_err(|error| format!("Codex 启动任务失败：{error}"))?
+}
+
+fn launch_codex_blocking(app: AppHandle, profile_id: String) -> Result<CodexInstance, String> {
     let mut data = load_data(&app)?;
     let profile_index = data
         .profiles
@@ -652,12 +667,41 @@ fn user_data_dir_arg(path: &Path) -> OsString {
 }
 
 #[tauri::command]
-fn list_codex_instances() -> Result<Vec<CodexInstance>, String> {
-    let mut instances = codex_instances()
+async fn list_codex_instances() -> Result<Vec<CodexInstance>, String> {
+    let instances = codex_instances()
         .lock()
-        .map_err(|_| "实例状态锁已损坏。".to_string())?;
-    instances.retain(|instance| process_running(instance.pid));
-    Ok(instances.clone())
+        .map_err(|_| "实例状态锁已损坏。".to_string())?
+        .clone();
+    let checked_pids = instances
+        .iter()
+        .map(|instance| instance.pid)
+        .collect::<Vec<_>>();
+    let running = tauri::async_runtime::spawn_blocking(move || {
+        filter_running_instances(instances, process_running)
+    })
+    .await
+    .map_err(|error| format!("实例状态检查任务失败：{error}"))?;
+    let running_pids = running
+        .iter()
+        .map(|instance| instance.pid)
+        .collect::<Vec<_>>();
+    codex_instances()
+        .lock()
+        .map_err(|_| "实例状态锁已损坏。".to_string())?
+        .retain(|instance| {
+            !checked_pids.contains(&instance.pid) || running_pids.contains(&instance.pid)
+        });
+    Ok(running)
+}
+
+fn filter_running_instances(
+    instances: Vec<CodexInstance>,
+    mut is_running: impl FnMut(u32) -> bool,
+) -> Vec<CodexInstance> {
+    instances
+        .into_iter()
+        .filter(|instance| is_running(instance.pid))
+        .collect()
 }
 
 #[tauri::command]
@@ -1641,6 +1685,34 @@ mod tests {
             taskkill_args(42),
             ["/PID", "42", "/T", "/F"].map(str::to_string)
         );
+    }
+
+    #[test]
+    fn instance_status_filter_checks_each_snapshot_without_the_registry_lock() {
+        let instances = vec![
+            CodexInstance {
+                profile_id: "one".to_string(),
+                profile_name: "one".to_string(),
+                pid: 11,
+                started_at: String::new(),
+            },
+            CodexInstance {
+                profile_id: "two".to_string(),
+                profile_name: "two".to_string(),
+                pid: 22,
+                started_at: String::new(),
+            },
+        ];
+        let mut checked = Vec::new();
+
+        let running = filter_running_instances(instances, |pid| {
+            checked.push(pid);
+            pid == 22
+        });
+
+        assert_eq!(checked, vec![11, 22]);
+        assert_eq!(running.len(), 1);
+        assert_eq!(running[0].pid, 22);
     }
 
     #[test]

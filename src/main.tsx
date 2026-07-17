@@ -327,13 +327,19 @@ function App() {
     }
 
     let cancelled = false
+    let refreshing = false
     const refreshInspection = () => {
+      if (refreshing) return
+      refreshing = true
       invoke<ProfileInspection>('inspect_profile', { profileId: selectedProfileId })
         .then((inspection) => {
           if (!cancelled) setProfileInspection(inspection)
         })
         .catch(() => {
           if (!cancelled) setProfileInspection(null)
+        })
+        .finally(() => {
+          refreshing = false
         })
     }
     refreshInspection()

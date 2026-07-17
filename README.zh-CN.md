@@ -17,6 +17,7 @@
 - 按 Profile 扫描本地 session 用量。
 - 支持为本工具和 Codex 启动配置 HTTP / SOCKS5 代理。
 - 支持同时启动和停止多个独立 Codex 实例。
+- Profile 检查、启动准备和进程状态查询不会占用 UI 事件线程，Codex 运行任务时切换工具仍可保持响应。
 - 删除 Profile、修改用户级环境变量等危险操作会显示保护性确认弹窗。
 - Profile 实例通过安装包声明的 Codex 桌面入口启动，默认实例仍通过 `shell:AppsFolder` 启动。
 - 可以删除用户级 `CODEX_HOME`，恢复 Codex 默认 Home 行为。
@@ -110,4 +111,4 @@ npm run tauri:build
 
 发布前必须更新 `CHANGELOG.md`、`README.md` 和 `README.zh-CN.md`。
 
-当前版本：`0.2.2`。
+当前版本：`0.2.3`。

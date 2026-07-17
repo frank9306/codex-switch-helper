@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.3 - 2026-07-17
+
+- Kept the helper responsive while Codex tasks update large Profile Homes by moving recursive Profile inspection off the Tauri event thread and preventing overlapping refreshes.
+- Moved Profile launch preparation off the event thread so executable discovery, file synchronization, and process startup no longer freeze the helper UI.
+- Avoided holding the instance registry lock while checking Windows process status.
+
 ## 0.2.2 - 2026-07-17
 
 - Added in-app sign-in for new account Profiles without requiring a pre-existing `auth.json`, while keeping credentials isolated in each managed Home.
