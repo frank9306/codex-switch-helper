@@ -90,6 +90,13 @@ type AppState = {
   currentCodexHome?: string
 }
 
+type ProfileInspection = {
+  exists: boolean
+  hasAuthJson: boolean
+  hasConfigToml: boolean
+  fileCount: number
+}
+
 type ConnectionTestResult = {
   ok: boolean
   status: string
@@ -191,6 +198,7 @@ function App() {
   const [resources, setResources] = useState<SharedResources | null>(null)
   const [agentsDraft, setAgentsDraft] = useState('')
   const [instances, setInstances] = useState<CodexInstance[]>([])
+  const [profileInspection, setProfileInspection] = useState<ProfileInspection | null>(null)
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null)
   const codexAppIdDetectionStarted = useRef(false)
 
@@ -311,6 +319,30 @@ function App() {
   }, [activeMenu])
 
   const selectedProfile = state?.profiles.find((profile) => profile.id === selectedProfileId)
+
+  useEffect(() => {
+    if (!selectedProfileId || mode !== 'detail') {
+      setProfileInspection(null)
+      return
+    }
+
+    let cancelled = false
+    const refreshInspection = () => {
+      invoke<ProfileInspection>('inspect_profile', { profileId: selectedProfileId })
+        .then((inspection) => {
+          if (!cancelled) setProfileInspection(inspection)
+        })
+        .catch(() => {
+          if (!cancelled) setProfileInspection(null)
+        })
+    }
+    refreshInspection()
+    const timer = window.setInterval(refreshInspection, 3000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [selectedProfileId, mode])
 
 
   function applyApiProviderPreset(provider: ApiProvider) {
@@ -792,6 +824,7 @@ function App() {
                 ) : selectedProfile ? (
                   <ProfileDetail
                     busy={busy}
+                    inspection={profileInspection}
                     instances={instances.filter((instance) => instance.profileId === selectedProfile.id)}
                     profile={selectedProfile}
                     onDelete={() => deleteProfile(selectedProfile)}
@@ -1226,7 +1259,7 @@ function ProfileForm(props: {
   onSave: () => void
   onTest: () => void
 }) {
-  const canTest = props.authMode === 'account' ? true : Boolean(props.apiKey.trim())
+  const canTest = props.authMode === 'account' ? Boolean(props.authJsonPath.trim()) : Boolean(props.apiKey.trim())
   return (
     <div className="form-shell">
       <div className="section-title">
@@ -1243,7 +1276,7 @@ function ProfileForm(props: {
         <div className="login-option-grid">
           <button className={`login-option ${props.authMode === 'account' ? 'active' : ''}`} onClick={() => props.onAuthModeChange('account')} type="button">
             <strong>账号登录</strong>
-            <small>使用 auth.json</small>
+            <small>创建后在 Codex 中登录</small>
           </button>
           <button className={`login-option ${props.authMode === 'apiKey' ? 'active' : ''}`} onClick={() => props.onAuthModeChange('apiKey')} type="button">
             <strong>API Key</strong>
@@ -1254,14 +1287,14 @@ function ProfileForm(props: {
 
       {props.authMode === 'account' ? (
         <div className="field-block route-card">
-          <span>auth.json 文件</span>
+          <span>导入已有 auth.json（可选）</span>
           <div className="path-picker">
             <input placeholder="选择或粘贴 auth.json 文件路径" value={props.authJsonPath} onChange={(event) => props.onAuthJsonPathChange(event.target.value)} />
             <button className="secondary-action" disabled={props.busy} onClick={props.onChooseAuthJsonFile} type="button">
               选择文件
             </button>
           </div>
-          <p className="hint">留空时从默认 Codex Home 复制登录状态。</p>
+          <p className="hint">无需手动配置。留空创建后，点击“登录此 Profile”并在 Codex 中完成登录。</p>
         </div>
       ) : (
         <div className="route-card">
@@ -1314,6 +1347,7 @@ function ProfileForm(props: {
 
 function ProfileDetail(props: {
   busy: boolean
+  inspection: ProfileInspection | null
   instances: CodexInstance[]
   profile: Profile
   onDelete: () => void
@@ -1343,11 +1377,17 @@ function ProfileDetail(props: {
           <dt>登录方式</dt>
           <dd>{props.profile.authMode === 'apiKey' ? 'API Key 登录' : '账号登录'}</dd>
         </div>
+        {props.profile.authMode === 'account' && (
+          <div>
+            <dt>登录状态</dt>
+            <dd>{props.inspection?.hasAuthJson ? '已登录' : '待登录'}</dd>
+          </div>
+        )}
       </dl>
 
       <div className="actions">
         <button className="primary-action" disabled={props.busy} onClick={props.onLaunch} type="button">
-          用此 Profile 启动 Codex
+          {props.profile.authMode === 'account' && !props.inspection?.hasAuthJson ? '登录此 Profile' : '用此 Profile 启动 Codex'}
         </button>
         <button className="secondary-action" disabled={props.busy} onClick={props.onTest} type="button">
           测试连通

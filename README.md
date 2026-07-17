@@ -13,7 +13,7 @@ Tauri desktop helper for switching Codex App profiles on Windows.
 - Manages multiple Codex Profiles with separate saved auth data.
 - Gives every Profile an isolated tool-managed Home.
 - Supports account-login Profiles and API-key Profiles.
-- Edits shared `~/.agents/AGENTS.md` and lists `~/.agents/skills`.
+- Edits one global `~/.agents/AGENTS.md`, linked into every managed Profile Home, and lists `~/.agents/skills`.
 - Scans local session usage by Profile.
 - Supports HTTP and SOCKS5 proxy settings for the helper app and Codex launches.
 - Runs multiple isolated Codex instances in parallel.
@@ -25,6 +25,7 @@ Tauri desktop helper for switching Codex App profiles on Windows.
 ## Profile Isolation
 
 - New Profiles copy the default Codex Home into `app_data/profiles/<profileId>/home`.
+- Account Profiles do not inherit credentials from the default Home unless an existing `auth.json` is explicitly selected.
 - Legacy shared Profiles are copied into managed Homes without deleting their original directories.
 - Each launch gets a process-local `CODEX_HOME` and a dedicated `--user-data-dir`.
 - Deleting a Profile removes only its tool-managed directory.
@@ -32,6 +33,8 @@ Tauri desktop helper for switching Codex App profiles on Windows.
 ## Auth Behavior
 
 - Credentials and `OPENAI_API_KEY` are passed only to the launched Codex process.
+- Creating an account Profile does not require editing `config.toml` or locating `auth.json`. Launch it and complete sign-in inside Codex.
+- Managed account Homes automatically use file-based credential storage so each Profile keeps an isolated login.
 - API keys and saved auth/config data are currently stored in local JSON without encryption.
 
 ## Default Launch
@@ -107,4 +110,4 @@ npm run tauri:build
 
 Also update `CHANGELOG.md`, `README.md`, and `README.zh-CN.md` before tagging a release.
 
-Current release: `0.2.1`.
+Current release: `0.2.2`.

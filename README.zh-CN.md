@@ -13,7 +13,7 @@
 - 管理多个 Codex Profile，并为每个 Profile 保存独立登录数据。
 - 每个 Profile 使用独立的工具托管目录。
 - 支持账号登录 Profile 和 API Key 登录 Profile。
-- 查看和编辑共享的 `~/.agents/AGENTS.md`，并列出 `~/.agents/skills`。
+- 查看和编辑全局 `~/.agents/AGENTS.md`；该文件会链接到所有托管 Profile Home，同时列出 `~/.agents/skills`。
 - 按 Profile 扫描本地 session 用量。
 - 支持为本工具和 Codex 启动配置 HTTP / SOCKS5 代理。
 - 支持同时启动和停止多个独立 Codex 实例。
@@ -25,6 +25,7 @@
 ## Profile 隔离
 
 - 新建 Profile 自动把默认 Codex Home 复制到 `app_data/profiles/<profileId>/home`。
+- 除非用户明确选择已有 `auth.json`，账号 Profile 不会继承默认 Home 的登录凭据。
 - 旧共享 Profile 会安全复制到新的托管目录，原 Home 不会删除。
 - 启动时为每个 Profile 设置独立进程级 `CODEX_HOME` 和 `--user-data-dir`。
 - 删除 Profile 只删除工具托管目录。
@@ -32,6 +33,8 @@
 ## 登录行为
 
 - 登录凭据和 `OPENAI_API_KEY` 只传递给对应 Codex 进程，不修改用户级变量。
+- 新建账号 Profile 不需要手动修改 `config.toml` 或寻找 `auth.json`；创建后启动 Codex 并在其中完成登录即可。
+- 托管账号 Home 会自动使用文件凭据存储，确保每个 Profile 的登录状态相互隔离。
 - API Key 以及保存的 auth/config 数据当前明文存储在本地 JSON 中，暂未加密。
 
 ## 默认启动
@@ -107,4 +110,4 @@ npm run tauri:build
 
 发布前必须更新 `CHANGELOG.md`、`README.md` 和 `README.zh-CN.md`。
 
-当前版本：`0.2.1`。
+当前版本：`0.2.2`。

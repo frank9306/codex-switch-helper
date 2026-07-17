@@ -1,6 +1,6 @@
 [package]
 name = "codex-switch-helper"
-version = "0.2.1"
+version = "0.2.2"
 description = "Codex profile switch helper"
 authors = ["frank"]
 edition = "2021"

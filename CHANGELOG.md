@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.2 - 2026-07-17
+
+- Added in-app sign-in for new account Profiles without requiring a pre-existing `auth.json`, while keeping credentials isolated in each managed Home.
+- Fixed stopping launched Codex instances by forcefully terminating the complete process tree and confirming the tracked process exited.
+- Shared one global `~/.agents/AGENTS.md` across all managed Profiles through file links, with automatic repair during Profile creation, migration, launch, and prompt updates.
+- Added Profile login-state visibility and clearer account setup guidance.
+
 ## 0.2.1 - 2026-07-15
 
 - Fixed Profile launches by resolving the packaged Codex desktop entry point from its AppX manifest.

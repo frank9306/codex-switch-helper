@@ -6,6 +6,8 @@ mod modules;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 #[cfg(windows)]
+use std::os::windows::fs::symlink_file;
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::{
     env,
@@ -29,6 +31,7 @@ const DATA_FILE_OVERRIDE_ENV_KEY: &str = "CODEX_SWITCH_HELPER_DATA_FILE";
 
 const CODEX_PROCESS_NAME: &str = "Codex.exe";
 const CODEX_CONFIG_FILENAME: &str = "config.toml";
+const FILE_AUTH_CREDENTIALS_SETTING: &str = "cli_auth_credentials_store = \"file\"";
 const SHARED_AGENTS_FILENAME: &str = "AGENTS.md";
 const ENVIRONMENT_BROADCAST_TIMEOUT_MS: u32 = 500;
 const DETECT_CODEX_EXECUTABLE_SCRIPT: &str = r#"
@@ -264,6 +267,15 @@ fn create_profile(
         EnvironmentMode::Sandbox,
     )?;
     copy_dir_recursive(&source_path, Path::new(&profile.home_path)).map_err(format_io_error)?;
+    initialize_new_profile_auth_files(&profile, Path::new(&profile.home_path))?;
+    ensure_shared_agents_link(Path::new(&profile.home_path))?;
+    if let Some(config_toml) = profile.config_toml.as_deref() {
+        fs::write(
+            Path::new(&profile.home_path).join(CODEX_CONFIG_FILENAME),
+            config_toml,
+        )
+        .map_err(format_io_error)?;
+    }
     data.profiles.push(profile.clone());
     if data.active_profile_id.is_none() {
         data.active_profile_id = Some(profile.id.clone());
@@ -318,6 +330,15 @@ fn update_profile(
             }
             profile.auth_json = Some(fs::read_to_string(auth_json_path).map_err(format_io_error)?);
         }
+        let config_toml =
+            with_file_auth_credentials_store(profile.config_toml.as_deref().unwrap_or_default());
+        fs::create_dir_all(&profile.home_path).map_err(format_io_error)?;
+        fs::write(
+            Path::new(&profile.home_path).join(CODEX_CONFIG_FILENAME),
+            &config_toml,
+        )
+        .map_err(format_io_error)?;
+        profile.config_toml = Some(config_toml);
     } else {
         profile.auth_json = None;
         if api_route_enabled {
@@ -479,7 +500,7 @@ fn launch_codex(app: AppHandle, profile_id: String) -> Result<CodexInstance, Str
         data.profiles[profile_index].config_toml = Some(config_toml);
     }
     apply_profile_auth_files_to_home(&data.profiles[profile_index], &home_path, false)?;
-    sync_shared_agents_to_home(&home_path)?;
+    ensure_shared_agents_link(&home_path)?;
     if let Some(config_toml) = migrate_home_config_paths(
         &app,
         &PathBuf::from(&data.profiles[profile_index].home_path),
@@ -650,17 +671,29 @@ fn stop_codex_instance(pid: u32) -> Result<(), String> {
         return Err("该 PID 不是本程序启动的 Codex 实例。".to_string());
     }
     let status = hidden_command("taskkill.exe")
-        .args(["/PID", &pid.to_string(), "/T"])
+        .args(taskkill_args(pid))
         .status()
         .map_err(format_io_error)?;
     if !status.success() {
         return Err(format!("无法停止 Codex 实例 PID {pid}。"));
+    }
+    if process_running(pid) {
+        return Err(format!("Codex 实例 PID {pid} 在强制终止后仍在运行。"));
     }
     codex_instances()
         .lock()
         .map_err(|_| "实例状态锁已损坏。".to_string())?
         .retain(|instance| instance.pid != pid);
     Ok(())
+}
+
+fn taskkill_args(pid: u32) -> [String; 4] {
+    [
+        "/PID".to_string(),
+        pid.to_string(),
+        "/T".to_string(),
+        "/F".to_string(),
+    ]
 }
 
 fn process_running(pid: u32) -> bool {
@@ -706,6 +739,11 @@ fn new_profile(
     } else {
         None
     };
+    if environment_mode == EnvironmentMode::Sandbox && matches!(auth_mode, AuthMode::Account) {
+        config_toml = Some(with_file_auth_credentials_store(
+            config_toml.as_deref().unwrap_or_default(),
+        ));
+    }
     let api_provider = normalize_optional_string(api_provider);
     let api_base_url = normalize_optional_string(api_base_url);
     let api_route_model = normalize_optional_string(api_route_model);
@@ -763,14 +801,42 @@ fn shared_agents_path() -> Result<PathBuf, String> {
     Ok(agents_root()?.join(SHARED_AGENTS_FILENAME))
 }
 
-fn sync_shared_agents_to_home(codex_home: &Path) -> Result<(), String> {
+fn ensure_shared_agents_link(codex_home: &Path) -> Result<(), String> {
     let source = shared_agents_path()?;
-    if !source.is_file() {
+    if let Some(parent) = source.parent() {
+        fs::create_dir_all(parent).map_err(format_io_error)?;
+    }
+    if !source.exists() {
+        fs::write(&source, "").map_err(format_io_error)?;
+    }
+    link_agents_file(&source, codex_home)
+}
+
+fn link_agents_file(source: &Path, codex_home: &Path) -> Result<(), String> {
+    fs::create_dir_all(codex_home).map_err(format_io_error)?;
+    let target = codex_home.join(SHARED_AGENTS_FILENAME);
+    if fs::read_link(&target).ok().as_deref() == Some(source) {
         return Ok(());
     }
-    fs::copy(source, codex_home.join(SHARED_AGENTS_FILENAME))
-        .map(|_| ())
+    if target.exists() || fs::symlink_metadata(&target).is_ok() {
+        fs::remove_file(&target).map_err(format_io_error)?;
+    }
+    #[cfg(windows)]
+    {
+        symlink_file(&source, &target).or_else(|symlink_error| {
+            fs::hard_link(&source, &target).map_err(|hard_link_error| {
+                io::Error::new(
+                    hard_link_error.kind(),
+                    format!(
+                        "无法创建 AGENTS.md 符号链接（{symlink_error}），硬链接回退也失败（{hard_link_error}）"
+                    ),
+                )
+            })
+        })
         .map_err(format_io_error)
+    }
+    #[cfg(not(windows))]
+    std::os::unix::fs::symlink(&source, &target).map_err(format_io_error)
 }
 
 #[tauri::command]
@@ -814,12 +880,17 @@ fn get_shared_resources() -> Result<SharedResources, String> {
 }
 
 #[tauri::command]
-fn save_shared_agents(content: String) -> Result<(), String> {
+fn save_shared_agents(app: AppHandle, content: String) -> Result<(), String> {
     let path = shared_agents_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(format_io_error)?;
     }
-    fs::write(path, content).map_err(format_io_error)
+    fs::write(path, content).map_err(format_io_error)?;
+    let data = load_data(&app)?;
+    for profile in data.profiles.iter().filter(|profile| profile.managed) {
+        ensure_shared_agents_link(Path::new(&profile.home_path))?;
+    }
+    Ok(())
 }
 
 fn read_auth_json(source_path: &Path) -> Result<String, String> {
@@ -841,6 +912,33 @@ fn read_config_toml(source_path: &Path) -> Result<Option<String>, String> {
     fs::read_to_string(config_path)
         .map(Some)
         .map_err(format_io_error)
+}
+
+fn with_file_auth_credentials_store(config_toml: &str) -> String {
+    let mut found = false;
+    let mut lines = config_toml
+        .lines()
+        .map(|line| {
+            let is_auth_store = line
+                .split_once('=')
+                .is_some_and(|(key, _)| key.trim() == "cli_auth_credentials_store");
+            if is_auth_store {
+                found = true;
+                FILE_AUTH_CREDENTIALS_SETTING.to_string()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if !found {
+        // This is a root-level Codex setting. Prepend it so a trailing TOML table
+        // (for example `[mcp_servers.foo]`) cannot capture it.
+        lines.insert(0, FILE_AUTH_CREDENTIALS_SETTING.to_string());
+    }
+    let mut result = lines.join("\n");
+    result.push('\n');
+    result
 }
 
 fn migrate_home_config_paths(app: &AppHandle, codex_home: &Path) -> Result<Option<String>, String> {
@@ -893,7 +991,7 @@ fn apply_profile_auth_files_to_home(
         AuthMode::Account => {
             let auth_json = profile.auth_json.as_deref();
             let auth_path = codex_home.join("auth.json");
-            if auth_json.is_none() && !require_stored_account_auth && auth_path.exists() {
+            if auth_json.is_none() && !require_stored_account_auth {
                 return Ok(());
             }
             let auth_json = auth_json
@@ -910,6 +1008,25 @@ fn apply_profile_auth_files_to_home(
             Ok(())
         }
     }
+}
+
+fn initialize_new_profile_auth_files(profile: &Profile, codex_home: &Path) -> Result<(), String> {
+    let auth_path = codex_home.join("auth.json");
+    match profile.auth_mode {
+        AuthMode::Account => {
+            if let Some(auth_json) = profile.auth_json.as_deref() {
+                fs::write(auth_path, auth_json).map_err(format_io_error)?;
+            } else if auth_path.exists() {
+                fs::remove_file(auth_path).map_err(format_io_error)?;
+            }
+        }
+        AuthMode::ApiKey => {
+            if auth_path.exists() {
+                fs::remove_file(auth_path).map_err(format_io_error)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn managed_profile_home(app: &AppHandle, profile_id: &str) -> Result<PathBuf, String> {
@@ -1270,6 +1387,9 @@ fn load_data(app: &AppHandle) -> Result<StoredData, String> {
         profile.updated_at = Utc::now().to_rfc3339();
         migrated = true;
     }
+    for profile in data.profiles.iter().filter(|profile| profile.managed) {
+        ensure_shared_agents_link(Path::new(&profile.home_path))?;
+    }
     if migrated {
         let next = serde_json::to_string_pretty(&data)
             .map_err(|error| format!("配置序列化失败：{error}"))?;
@@ -1486,11 +1606,59 @@ mod usage_scanner_tests {
 mod tests {
     use super::*;
 
+    fn account_profile(home_path: &Path) -> Profile {
+        Profile {
+            id: "test-profile".to_string(),
+            name: "test".to_string(),
+            home_path: home_path.to_string_lossy().to_string(),
+            import_source_path: None,
+            environment_mode: EnvironmentMode::Sandbox,
+            auth_mode: AuthMode::Account,
+            api_key: None,
+            api_provider: None,
+            api_base_url: None,
+            api_route_enabled: false,
+            api_route_model: None,
+            auth_json: None,
+            config_toml: None,
+            managed: true,
+            created_at: String::new(),
+            updated_at: String::new(),
+            last_used_at: None,
+        }
+    }
+
     #[test]
     fn codex_executable_detection_uses_the_appx_manifest_entrypoint() {
         assert!(DETECT_CODEX_EXECUTABLE_SCRIPT.contains("Get-AppxPackageManifest"));
         assert!(DETECT_CODEX_EXECUTABLE_SCRIPT.contains("$application.Executable"));
         assert!(!DETECT_CODEX_EXECUTABLE_SCRIPT.contains("-Filter Codex.exe -Recurse"));
+    }
+
+    #[test]
+    fn stopping_an_instance_forcefully_kills_the_entire_process_tree() {
+        assert_eq!(
+            taskkill_args(42),
+            ["/PID", "42", "/T", "/F"].map(str::to_string)
+        );
+    }
+
+    #[test]
+    fn profiles_share_live_agents_content_through_a_link() {
+        let root = env::temp_dir().join(format!("codex-agents-link-test-{}", Uuid::new_v4()));
+        let source = root.join("shared").join(SHARED_AGENTS_FILENAME);
+        let home = root.join("profile-home");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, "first").unwrap();
+
+        link_agents_file(&source, &home).unwrap();
+        fs::write(&source, "second").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(home.join(SHARED_AGENTS_FILENAME)).unwrap(),
+            "second"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1534,6 +1702,62 @@ mod tests {
             migrated,
             "path = 'C:/Users/frank/AppData/Roaming/com.frank.codex-switch-helper/profiles/p1/home/skills/hunt'"
         );
+    }
+
+    #[test]
+    fn account_profiles_force_file_based_credentials_without_losing_config() {
+        let config = "model = \"gpt-5.5\"\ncli_auth_credentials_store = \"keyring\"\n";
+
+        let updated = with_file_auth_credentials_store(config);
+
+        assert!(updated.contains("model = \"gpt-5.5\""));
+        assert_eq!(
+            updated
+                .lines()
+                .filter(|line| line.starts_with("cli_auth_credentials_store"))
+                .collect::<Vec<_>>(),
+            vec![FILE_AUTH_CREDENTIALS_SETTING]
+        );
+    }
+
+    #[test]
+    fn account_profiles_add_file_based_credentials_to_empty_config() {
+        assert_eq!(
+            with_file_auth_credentials_store(""),
+            format!("{FILE_AUTH_CREDENTIALS_SETTING}\n")
+        );
+    }
+
+    #[test]
+    fn account_credentials_setting_stays_at_toml_root() {
+        let config = "[mcp_servers.docs]\nurl = \"https://example.com\"\n";
+
+        let updated = with_file_auth_credentials_store(config);
+
+        assert!(updated.starts_with(FILE_AUTH_CREDENTIALS_SETTING));
+        assert!(updated.contains("[mcp_servers.docs]"));
+    }
+
+    #[test]
+    fn account_profile_can_launch_before_first_login() {
+        let home = env::temp_dir().join(format!("codex-profile-test-{}", Uuid::new_v4()));
+        let profile = account_profile(&home);
+
+        assert!(apply_profile_auth_files_to_home(&profile, &home, false).is_ok());
+        assert!(!home.exists());
+    }
+
+    #[test]
+    fn new_account_profile_does_not_inherit_source_auth() {
+        let home = env::temp_dir().join(format!("codex-profile-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&home).unwrap();
+        fs::write(home.join("auth.json"), "source credentials").unwrap();
+        let profile = account_profile(&home);
+
+        initialize_new_profile_auth_files(&profile, &home).unwrap();
+
+        assert!(!home.join("auth.json").exists());
+        fs::remove_dir(&home).unwrap();
     }
 }
 
