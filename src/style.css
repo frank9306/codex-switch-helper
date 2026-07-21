@@ -49,7 +49,8 @@ body::before {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -124,7 +125,8 @@ button.danger:hover:not(:disabled) {
   margin-top: 0;
 }
 
-input {
+input,
+select {
   background: rgba(255, 255, 255, 0.86);
   border: 1px solid rgba(148, 163, 184, 0.26);
   border-radius: 13px;
@@ -135,6 +137,11 @@ input {
 }
 
 input:focus {
+  border-color: rgba(36, 120, 255, 0.56);
+  box-shadow: 0 0 0 4px rgba(36, 120, 255, 0.11);
+}
+
+select:focus {
   border-color: rgba(36, 120, 255, 0.56);
   box-shadow: 0 0 0 4px rgba(36, 120, 255, 0.11);
 }
@@ -688,6 +695,99 @@ code {
   margin-top: 14px;
 }
 
+.skin-settings {
+  background: rgba(248, 251, 255, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 18px;
+  display: grid;
+  gap: 14px;
+  margin-top: 16px;
+  padding: 15px;
+}
+
+.skin-settings-heading,
+.skin-image-row,
+.skin-settings-footer {
+  align-items: center;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.skin-settings h3 {
+  color: var(--text);
+  font-size: 14px;
+  margin: 0;
+}
+
+.skin-settings .compact-toggle {
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  flex: 0 0 auto;
+  margin: 0;
+  min-height: 40px;
+  padding: 0 12px;
+}
+
+.skin-image-row > div {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.skin-image-row span,
+.skin-focus-grid span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.skin-image-row code {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skin-options-grid,
+.skin-focus-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.skin-focus-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.skin-options-grid label,
+.skin-focus-grid label {
+  margin: 0;
+}
+
+.skin-focus-grid input[type="range"] {
+  accent-color: var(--blue);
+  padding: 6px 0;
+}
+
+.skin-settings-footer {
+  border-top: 1px solid var(--line);
+  padding-top: 13px;
+}
+
+.skin-settings-footer p {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+  max-width: 62ch;
+}
+
+.skin-settings-footer a {
+  color: var(--blue);
+  font-weight: 800;
+}
+
 .empty-state {
   align-content: center;
   display: grid;
@@ -1186,6 +1286,8 @@ code {
   .stats-grid,
   .facts,
   .path-picker,
+  .skin-options-grid,
+  .skin-focus-grid,
   .usage-stat-grid,
   .usage-facts,
   .usage-profile-card dl,
@@ -1208,6 +1310,13 @@ code {
 
   .profile-card {
     min-height: 0;
+  }
+
+  .skin-settings-heading,
+  .skin-image-row,
+  .skin-settings-footer {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .profile-card-topline,
@@ -1453,7 +1562,7 @@ code {
   border-color: rgba(148, 163, 184, .16);
 }
 
-:root[data-theme="dark"] :is(button, input, .secondary-action, .profile-item, .profile-card, .env-card, .active-profile, .facts div, .about-facts div, .usage-facts div, .usage-profile-card, .usage-session-row, .skill-row, .instance-row, .settings-toggle, .route-card, .update-summary) {
+:root[data-theme="dark"] :is(button, input, select, .secondary-action, .profile-item, .profile-card, .env-card, .active-profile, .facts div, .about-facts div, .usage-facts div, .usage-profile-card, .usage-session-row, .skill-row, .instance-row, .settings-toggle, .route-card, .update-summary, .skin-settings, .compact-toggle) {
   background: rgba(28, 40, 57, .86);
   border-color: rgba(148, 163, 184, .2);
   color: var(--text);

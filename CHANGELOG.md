@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.5 - 2026-07-21
+
+- Added optional per-Profile Codex background skins using a loopback-only CDP injector derived from Fei-Away/Codex-Dream-Skin under the MIT License.
+- Added managed background storage, appearance, focus, safe-area, and task-page settings for each Profile.
+- Added upstream provenance, license, copyright, artwork-rights, and unofficial-product notices.
+
 ## 0.2.4 - 2026-07-17
 
 - Added a Windows system tray with show and quit actions; closing the main window now keeps the helper available from the tray.

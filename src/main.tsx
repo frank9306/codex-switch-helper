@@ -13,6 +13,19 @@ type Mode = 'detail' | 'new' | 'edit'
 type ActiveMenu = 'profiles' | 'resources' | 'usage' | 'settings' | 'about'
 type ProxyProtocol = 'http' | 'socks5'
 type Theme = 'light' | 'dark'
+type SkinAppearance = 'auto' | 'light' | 'dark'
+type SkinSafeArea = 'auto' | 'left' | 'right' | 'center' | 'none'
+type SkinTaskMode = 'auto' | 'ambient' | 'banner' | 'off'
+
+type ProfileSkinSettings = {
+  enabled: boolean
+  backgroundPath?: string
+  appearance: SkinAppearance
+  focusX: number
+  focusY: number
+  safeArea: SkinSafeArea
+  taskMode: SkinTaskMode
+}
 
 type ConfirmIntent = 'danger' | 'warning'
 
@@ -72,6 +85,7 @@ type Profile = {
   createdAt: string
   updatedAt: string
   lastUsedAt?: string
+  skin: ProfileSkinSettings
 }
 
 type AppSettings = {
@@ -620,6 +634,18 @@ function App() {
     }, '正在打开目录...')
   }
 
+  async function saveProfileSkin(profileId: string, skin: ProfileSkinSettings, selectedImagePath?: string) {
+    await runAction(async () => {
+      await invoke<Profile>('update_profile_skin', {
+        profileId,
+        skin,
+        selectedImagePath: selectedImagePath || null,
+      })
+      await loadState()
+      return skin.enabled ? '已保存皮肤设置，下次启动此 Profile 时生效。' : '已关闭此 Profile 的皮肤。'
+    }, '正在保存皮肤设置...')
+  }
+
   async function refreshUsage(scan: boolean) {
     setUsageBusy(true)
     setMessage('')
@@ -690,6 +716,8 @@ function App() {
     { label: '作者', value: 'Frank' },
     { label: '项目', value: 'Codex Switch Helper' },
     { label: '仓库', value: 'https://github.com/frank9306/codex-switch-helper', href: 'https://github.com/frank9306/codex-switch-helper' },
+    { label: '皮肤来源', value: 'Fei-Away/Codex-Dream-Skin', href: 'https://github.com/Fei-Away/Codex-Dream-Skin' },
+    { label: '皮肤许可', value: 'MIT License，上游 commit e776fa6d' },
     { label: '定位', value: '本地 Codex Profile 管理工具' },
     { label: '版本', value: appVersion || '未知' },
   ]
@@ -882,6 +910,7 @@ function App() {
                     onLaunch={() => launchProfile(selectedProfile.id)}
                     onTest={() => testProfile(selectedProfile.id)}
                     onReveal={() => revealProfile(selectedProfile.id)}
+                    onSaveSkin={(skin, selectedImagePath) => saveProfileSkin(selectedProfile.id, skin, selectedImagePath)}
                     onStop={stopInstance}
                   />
                 ) : (
@@ -1444,8 +1473,34 @@ function ProfileDetail(props: {
   onLaunch: () => void
   onTest: () => void
   onReveal: () => void
+  onSaveSkin: (skin: ProfileSkinSettings, selectedImagePath?: string) => Promise<void>
   onStop: (pid: number) => void
 }) {
+  const defaultSkin: ProfileSkinSettings = {
+    enabled: false,
+    appearance: 'auto',
+    focusX: 0.5,
+    focusY: 0.5,
+    safeArea: 'auto',
+    taskMode: 'auto',
+  }
+  const [skinDraft, setSkinDraft] = useState<ProfileSkinSettings>(props.profile.skin || defaultSkin)
+  const [selectedSkinImage, setSelectedSkinImage] = useState('')
+
+  useEffect(() => {
+    setSkinDraft(props.profile.skin || defaultSkin)
+    setSelectedSkinImage('')
+  }, [props.profile.id, props.profile.updatedAt])
+
+  async function chooseSkinImage() {
+    const selected = await open({
+      directory: false,
+      multiple: false,
+      filters: [{ name: '背景图片', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
+    })
+    if (typeof selected === 'string') setSelectedSkinImage(selected)
+  }
+
   return (
     <div className="form-shell">
       <div className="panel-header">
@@ -1472,7 +1527,93 @@ function ProfileDetail(props: {
             <dd>{props.inspection?.hasAuthJson ? '已登录' : '待登录'}</dd>
           </div>
         )}
+        <div>
+          <dt>Codex 皮肤</dt>
+          <dd>{props.profile.skin?.enabled ? '已启用' : '未启用'}</dd>
+        </div>
       </dl>
+
+      <section className="skin-settings">
+        <div className="skin-settings-heading">
+          <div className="section-title">
+            <h3>Codex 皮肤</h3>
+            <p>为此 Profile 启用独立背景，通过本机 CDP 注入，不修改官方安装包。</p>
+          </div>
+          <label className="toggle-row compact-toggle">
+            <input
+              type="checkbox"
+              checked={skinDraft.enabled}
+              onChange={(event) => setSkinDraft({ ...skinDraft, enabled: event.target.checked })}
+            />
+            <span>{skinDraft.enabled ? '已启用' : '未启用'}</span>
+          </label>
+        </div>
+
+        <div className="skin-image-row">
+          <div>
+            <span>背景图</span>
+            <code>{selectedSkinImage || skinDraft.backgroundPath || '尚未选择'}</code>
+          </div>
+          <button className="secondary-action" disabled={props.busy} onClick={chooseSkinImage} type="button">
+            选择图片
+          </button>
+        </div>
+
+        <div className="skin-options-grid">
+          <label>
+            <span>外观</span>
+            <select value={skinDraft.appearance} onChange={(event) => setSkinDraft({ ...skinDraft, appearance: event.target.value as SkinAppearance })}>
+              <option value="auto">自动</option>
+              <option value="light">浅色</option>
+              <option value="dark">深色</option>
+            </select>
+          </label>
+          <label>
+            <span>内容安全区</span>
+            <select value={skinDraft.safeArea} onChange={(event) => setSkinDraft({ ...skinDraft, safeArea: event.target.value as SkinSafeArea })}>
+              <option value="auto">自动</option>
+              <option value="left">左侧</option>
+              <option value="right">右侧</option>
+              <option value="center">居中</option>
+              <option value="none">不保留</option>
+            </select>
+          </label>
+          <label>
+            <span>任务页背景</span>
+            <select value={skinDraft.taskMode} onChange={(event) => setSkinDraft({ ...skinDraft, taskMode: event.target.value as SkinTaskMode })}>
+              <option value="auto">自动</option>
+              <option value="ambient">环境背景</option>
+              <option value="banner">顶部横幅</option>
+              <option value="off">关闭</option>
+            </select>
+          </label>
+        </div>
+
+        <div className="skin-focus-grid">
+          <label>
+            <span>水平焦点 {Math.round(skinDraft.focusX * 100)}%</span>
+            <input min="0" max="1" step="0.01" type="range" value={skinDraft.focusX} onChange={(event) => setSkinDraft({ ...skinDraft, focusX: Number(event.target.value) })} />
+          </label>
+          <label>
+            <span>垂直焦点 {Math.round(skinDraft.focusY * 100)}%</span>
+            <input min="0" max="1" step="0.01" type="range" value={skinDraft.focusY} onChange={(event) => setSkinDraft({ ...skinDraft, focusY: Number(event.target.value) })} />
+          </label>
+        </div>
+
+        <div className="skin-settings-footer">
+          <p>
+            功能基于 <a href="https://github.com/Fei-Away/Codex-Dream-Skin" rel="noreferrer" target="_blank">Fei-Away/Codex-Dream-Skin</a>，遵循 MIT License。请确保所选图片拥有合法使用权。
+          </p>
+          <button
+            className="secondary-action"
+            disabled={props.busy || (skinDraft.enabled && !selectedSkinImage && !skinDraft.backgroundPath)}
+            onClick={() => props.onSaveSkin(skinDraft, selectedSkinImage || undefined)}
+            type="button"
+          >
+            保存皮肤设置
+          </button>
+        </div>
+      </section>
 
       <div className="actions">
         <button className="primary-action" disabled={props.busy} onClick={props.onLaunch} type="button">

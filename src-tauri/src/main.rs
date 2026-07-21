@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod dream_skin;
 mod models;
 mod modules;
 
@@ -88,6 +89,53 @@ struct Profile {
     created_at: String,
     updated_at: String,
     last_used_at: Option<String>,
+    #[serde(default)]
+    skin: ProfileSkinSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileSkinSettings {
+    #[serde(default)]
+    enabled: bool,
+    background_path: Option<String>,
+    #[serde(default = "default_skin_appearance")]
+    appearance: String,
+    #[serde(default = "default_skin_focus")]
+    focus_x: f64,
+    #[serde(default = "default_skin_focus")]
+    focus_y: f64,
+    #[serde(default = "default_skin_safe_area")]
+    safe_area: String,
+    #[serde(default = "default_skin_task_mode")]
+    task_mode: String,
+}
+
+impl Default for ProfileSkinSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            background_path: None,
+            appearance: default_skin_appearance(),
+            focus_x: default_skin_focus(),
+            focus_y: default_skin_focus(),
+            safe_area: default_skin_safe_area(),
+            task_mode: default_skin_task_mode(),
+        }
+    }
+}
+
+fn default_skin_appearance() -> String {
+    "auto".to_string()
+}
+fn default_skin_focus() -> f64 {
+    0.5
+}
+fn default_skin_safe_area() -> String {
+    "auto".to_string()
+}
+fn default_skin_task_mode() -> String {
+    "auto".to_string()
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
@@ -184,6 +232,8 @@ struct CodexInstance {
     profile_name: String,
     pid: u32,
     started_at: String,
+    skin_injector_pid: Option<u32>,
+    skin_cdp_port: Option<u16>,
 }
 
 static CODEX_INSTANCES: OnceLock<Mutex<Vec<CodexInstance>>> = OnceLock::new();
@@ -367,6 +417,116 @@ fn update_profile(
 }
 
 #[tauri::command]
+fn update_profile_skin(
+    app: AppHandle,
+    profile_id: String,
+    mut skin: ProfileSkinSettings,
+    selected_image_path: Option<String>,
+) -> Result<Profile, String> {
+    validate_skin_settings(&skin)?;
+    let mut data = load_data(&app)?;
+    let profile = data
+        .profiles
+        .iter_mut()
+        .find(|profile| profile.id == profile_id)
+        .ok_or_else(|| "Profile 不存在。".to_string())?;
+    if let Some(selected) = normalize_optional_string(selected_image_path) {
+        let source = PathBuf::from(selected);
+        let metadata = fs::metadata(&source).map_err(format_io_error)?;
+        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > 16 * 1024 * 1024 {
+            return Err("皮肤背景必须是 1 字节到 16 MB 的图片文件。".to_string());
+        }
+        let extension = source
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+            .filter(|value| matches!(value.as_str(), "png" | "jpg" | "jpeg" | "webp"))
+            .ok_or_else(|| "皮肤背景仅支持 PNG、JPEG 或 WebP。".to_string())?;
+        let theme_dir = Path::new(&profile.home_path)
+            .join(".codex-switch-helper")
+            .join("dream-skin");
+        fs::create_dir_all(&theme_dir).map_err(format_io_error)?;
+        let destination = theme_dir.join(format!("background.{extension}"));
+        let temporary = theme_dir.join(format!(".background-{}.tmp", Uuid::new_v4()));
+        fs::copy(&source, &temporary).map_err(format_io_error)?;
+        if destination.exists() {
+            fs::remove_file(&destination).map_err(format_io_error)?;
+        }
+        fs::rename(&temporary, &destination).map_err(format_io_error)?;
+        skin.background_path = Some(path_to_string(&destination)?);
+    } else if skin.background_path.is_none() {
+        skin.background_path = profile.skin.background_path.clone();
+    }
+    if skin.enabled && skin.background_path.is_none() {
+        return Err("启用皮肤前请先选择背景图。".to_string());
+    }
+    profile.skin = skin;
+    profile.updated_at = Utc::now().to_rfc3339();
+    let updated = profile.clone();
+    save_data(&app, &data)?;
+    Ok(updated)
+}
+
+fn validate_skin_settings(skin: &ProfileSkinSettings) -> Result<(), String> {
+    if !matches!(skin.appearance.as_str(), "auto" | "light" | "dark") {
+        return Err("皮肤外观只能是 auto、light 或 dark。".to_string());
+    }
+    if !(0.0..=1.0).contains(&skin.focus_x) || !(0.0..=1.0).contains(&skin.focus_y) {
+        return Err("皮肤焦点必须在 0 到 1 之间。".to_string());
+    }
+    if !matches!(
+        skin.safe_area.as_str(),
+        "auto" | "left" | "right" | "center" | "none"
+    ) {
+        return Err("皮肤安全区设置无效。".to_string());
+    }
+    if !matches!(
+        skin.task_mode.as_str(),
+        "auto" | "ambient" | "banner" | "off"
+    ) {
+        return Err("皮肤任务页模式无效。".to_string());
+    }
+    Ok(())
+}
+
+fn write_skin_theme(profile: &Profile, theme_dir: &Path) -> Result<(), String> {
+    validate_skin_settings(&profile.skin)?;
+    let background = PathBuf::from(
+        profile
+            .skin
+            .background_path
+            .as_deref()
+            .ok_or_else(|| "皮肤背景图未配置。".to_string())?,
+    );
+    let image_name = background
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "皮肤背景文件名无效。".to_string())?;
+    if background.parent() != Some(theme_dir) {
+        return Err("皮肤背景不在此 Profile 的受管主题目录中。".to_string());
+    }
+    fs::create_dir_all(theme_dir).map_err(format_io_error)?;
+    let theme = serde_json::json!({
+        "schemaVersion": 1,
+        "id": format!("profile-{}", profile.id),
+        "name": profile.name,
+        "image": image_name,
+        "appearance": profile.skin.appearance,
+        "art": {
+            "focusX": profile.skin.focus_x,
+            "focusY": profile.skin.focus_y,
+            "safeArea": profile.skin.safe_area,
+            "taskMode": profile.skin.task_mode,
+        }
+    });
+    fs::write(
+        theme_dir.join("theme.json"),
+        serde_json::to_string_pretty(&theme).map_err(|error| error.to_string())?,
+    )
+    .map_err(format_io_error)
+}
+
+#[tauri::command]
 fn delete_profile(app: AppHandle, profile_id: String) -> Result<(), String> {
     let mut data = load_data(&app)?;
     let profile = find_profile(&data, &profile_id)?.clone();
@@ -536,13 +696,67 @@ fn launch_codex_blocking(app: AppHandle, profile_id: String) -> Result<CodexInst
         .ok_or_else(|| "未找到 Codex 桌面应用入口，无法启动独立实例。".to_string())?;
     let app_user_data = app_data_dir(&app)?.join("codex-app-data").join(&profile_id);
     fs::create_dir_all(&app_user_data).map_err(format_io_error)?;
+    let skin = data.profiles[profile_index].skin.clone();
+    let skin_runtime = app
+        .path()
+        .resource_dir()
+        .map_err(|error| error.to_string())?
+        .join("dream-skin");
+    let skin_theme_dir = home_path.join(".codex-switch-helper").join("dream-skin");
+    let skin_launch = if skin.enabled {
+        let background = skin
+            .background_path
+            .as_deref()
+            .ok_or_else(|| "此 Profile 已启用皮肤，但尚未选择背景图。".to_string())?;
+        if !Path::new(background).is_file() {
+            return Err("此 Profile 的皮肤背景图不存在，请重新选择。".to_string());
+        }
+        write_skin_theme(&data.profiles[profile_index], &skin_theme_dir)?;
+        let node = dream_skin::validate_node()?;
+        let port = dream_skin::reserve_loopback_port()?;
+        Some((node, port))
+    } else {
+        None
+    };
     let mut command = hidden_command(executable.to_string_lossy().as_ref());
     command
         .arg(user_data_dir_arg(&app_user_data))
         .env(CODEX_HOME_ENV_KEY, &home_path);
+    if let Some((_, port)) = skin_launch.as_ref() {
+        command
+            .arg("--remote-debugging-address=127.0.0.1")
+            .arg(format!("--remote-debugging-port={port}"));
+    }
     apply_profile_process_env(&mut command, &data.profiles[profile_index])?;
     apply_proxy_process_env(&mut command, &data.settings)?;
-    let child = command.spawn().map_err(format_io_error)?;
+    let mut child = command.spawn().map_err(format_io_error)?;
+    let (skin_injector_pid, skin_cdp_port) = if let Some((node, port)) = skin_launch {
+        let browser_id =
+            match dream_skin::wait_for_browser_id(port, std::time::Duration::from_secs(30)) {
+                Ok(browser_id) => browser_id,
+                Err(error) => {
+                    let _ = child.kill();
+                    return Err(error);
+                }
+            };
+        let injector = match dream_skin::start_injector(
+            &node,
+            &skin_runtime,
+            &skin_theme_dir,
+            &home_path.join(".codex-switch-helper").join("logs"),
+            port,
+            &browser_id,
+        ) {
+            Ok(injector) => injector,
+            Err(error) => {
+                let _ = child.kill();
+                return Err(error);
+            }
+        };
+        (Some(injector.id()), Some(port))
+    } else {
+        (None, None)
+    };
 
     let launched_at = Utc::now();
     let now = launched_at.to_rfc3339();
@@ -560,6 +774,8 @@ fn launch_codex_blocking(app: AppHandle, profile_id: String) -> Result<CodexInst
         profile_name: data.profiles[profile_index].name.clone(),
         pid: child.id(),
         started_at: now,
+        skin_injector_pid,
+        skin_cdp_port,
     };
     codex_instances()
         .lock()
@@ -738,6 +954,20 @@ async fn list_codex_instances() -> Result<Vec<CodexInstance>, String> {
         .iter()
         .map(|instance| instance.pid)
         .collect::<Vec<_>>();
+    for instance in codex_instances()
+        .lock()
+        .map_err(|_| "实例状态锁已损坏。".to_string())?
+        .iter()
+        .filter(|instance| {
+            checked_pids.contains(&instance.pid) && !running_pids.contains(&instance.pid)
+        })
+    {
+        if let Some(injector_pid) = instance.skin_injector_pid {
+            let _ = hidden_command("taskkill.exe")
+                .args(taskkill_args(injector_pid))
+                .status();
+        }
+    }
     codex_instances()
         .lock()
         .map_err(|_| "实例状态锁已损坏。".to_string())?
@@ -763,9 +993,15 @@ fn stop_codex_instance(pid: u32) -> Result<(), String> {
         .lock()
         .map_err(|_| "实例状态锁已损坏。".to_string())?
         .iter()
-        .any(|instance| instance.pid == pid);
-    if !tracked {
+        .find(|instance| instance.pid == pid)
+        .cloned();
+    let Some(tracked) = tracked else {
         return Err("该 PID 不是本程序启动的 Codex 实例。".to_string());
+    };
+    if let Some(injector_pid) = tracked.skin_injector_pid {
+        let _ = hidden_command("taskkill.exe")
+            .args(taskkill_args(injector_pid))
+            .status();
     }
     let status = hidden_command("taskkill.exe")
         .args(taskkill_args(pid))
@@ -868,6 +1104,7 @@ fn new_profile(
         created_at: now.clone(),
         updated_at: now,
         last_used_at: None,
+        skin: ProfileSkinSettings::default(),
     })
 }
 
@@ -1746,6 +1983,7 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
             last_used_at: None,
+            skin: ProfileSkinSettings::default(),
         }
     }
 
@@ -1772,12 +2010,16 @@ mod tests {
                 profile_name: "one".to_string(),
                 pid: 11,
                 started_at: String::new(),
+                skin_injector_pid: None,
+                skin_cdp_port: None,
             },
             CodexInstance {
                 profile_id: "two".to_string(),
                 profile_name: "two".to_string(),
                 pid: 22,
                 started_at: String::new(),
+                skin_injector_pid: None,
+                skin_cdp_port: None,
             },
         ];
         let mut checked = Vec::new();
@@ -2111,6 +2353,7 @@ fn main() {
             clear_usage_data,
             create_profile,
             update_profile,
+            update_profile_skin,
             delete_profile,
             detect_codex_app_id,
             launch_default_codex,
