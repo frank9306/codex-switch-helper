@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.6 - 2026-07-22
+
+- Bypassed proxy routing for `127.0.0.1`, `localhost`, and `::1` while preserving existing `NO_PROXY` entries, so local CDP skin connections remain direct when a Profile proxy is enabled.
+- Removed page-wide skin washes so wide background artwork keeps its original colour and contrast.
+
 ## 0.2.5 - 2026-07-21
 
 - Added optional per-Profile Codex background skins using a loopback-only CDP injector derived from Fei-Away/Codex-Dream-Skin under the MIT License.

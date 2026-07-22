@@ -32,6 +32,8 @@ const OPENAI_API_KEY: &str = "OPENAI_API_KEY";
 const HTTP_PROXY_ENV_KEY: &str = "HTTP_PROXY";
 const HTTPS_PROXY_ENV_KEY: &str = "HTTPS_PROXY";
 const ALL_PROXY_ENV_KEY: &str = "ALL_PROXY";
+const NO_PROXY_ENV_KEY: &str = "NO_PROXY";
+const LOOPBACK_NO_PROXY: &str = "127.0.0.1,localhost,::1";
 const DATA_FILE_OVERRIDE_ENV_KEY: &str = "CODEX_SWITCH_HELPER_DATA_FILE";
 const AUTOSTART_REGISTRY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const AUTOSTART_VALUE_NAME: &str = "Codex Switch Helper";
@@ -805,10 +807,12 @@ fn apply_profile_process_env(command: &mut Command, profile: &Profile) -> Result
 fn apply_proxy_process_env(command: &mut Command, settings: &AppSettings) -> Result<(), String> {
     if settings.proxy_enabled {
         let proxy = proxy_url(settings)?;
+        let no_proxy = loopback_no_proxy_value(env::var_os(NO_PROXY_ENV_KEY));
         command
             .env(HTTP_PROXY_ENV_KEY, &proxy)
             .env(HTTPS_PROXY_ENV_KEY, &proxy)
-            .env(ALL_PROXY_ENV_KEY, &proxy);
+            .env(ALL_PROXY_ENV_KEY, &proxy)
+            .env(NO_PROXY_ENV_KEY, no_proxy);
     } else {
         command
             .env_remove(HTTP_PROXY_ENV_KEY)
@@ -1610,13 +1614,39 @@ fn proxy_url(settings: &AppSettings) -> Result<String, String> {
     ))
 }
 
+fn loopback_no_proxy_value(existing: Option<OsString>) -> OsString {
+    let mut entries = existing
+        .as_deref()
+        .map(|value| {
+            value
+                .to_string_lossy()
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for loopback in LOOPBACK_NO_PROXY.split(',') {
+        if !entries
+            .iter()
+            .any(|entry| entry.eq_ignore_ascii_case(loopback))
+        {
+            entries.push(loopback.to_string());
+        }
+    }
+    OsString::from(entries.join(","))
+}
+
 fn apply_proxy_settings_to_current_process(settings: &AppSettings) -> Result<(), String> {
     if settings.proxy_enabled {
         let proxy_url = proxy_url(settings)?;
+        let no_proxy = loopback_no_proxy_value(env::var_os(NO_PROXY_ENV_KEY));
         unsafe {
             env::set_var(HTTP_PROXY_ENV_KEY, &proxy_url);
             env::set_var(HTTPS_PROXY_ENV_KEY, &proxy_url);
             env::set_var(ALL_PROXY_ENV_KEY, &proxy_url);
+            env::set_var(NO_PROXY_ENV_KEY, no_proxy);
         }
     } else {
         unsafe {
@@ -2000,6 +2030,48 @@ mod tests {
             taskkill_args(42),
             ["/PID", "42", "/T", "/F"].map(str::to_string)
         );
+    }
+
+    #[test]
+    fn loopback_proxy_bypass_preserves_existing_hosts() {
+        assert_eq!(
+            loopback_no_proxy_value(None),
+            OsString::from("127.0.0.1,localhost,::1")
+        );
+        assert_eq!(
+            loopback_no_proxy_value(Some(OsString::from("example.internal"))),
+            OsString::from("example.internal,127.0.0.1,localhost,::1")
+        );
+        assert_eq!(
+            loopback_no_proxy_value(Some(OsString::from(
+                "example.internal,localhost,127.0.0.1,::1"
+            ))),
+            OsString::from("example.internal,localhost,127.0.0.1,::1")
+        );
+    }
+
+    #[test]
+    fn proxied_codex_process_receives_loopback_bypass() {
+        let settings = AppSettings {
+            proxy_enabled: true,
+            proxy_protocol: "http".to_string(),
+            proxy_host: "127.0.0.1".to_string(),
+            proxy_port: "7890".to_string(),
+            ..AppSettings::default()
+        };
+        let mut command = Command::new("cmd.exe");
+
+        apply_proxy_process_env(&mut command, &settings).unwrap();
+
+        let value = command
+            .get_envs()
+            .find(|(name, _)| name.to_string_lossy() == NO_PROXY_ENV_KEY)
+            .and_then(|(_, value)| value)
+            .expect("loopback proxy bypass must be set")
+            .to_string_lossy();
+        for loopback in LOOPBACK_NO_PROXY.split(',') {
+            assert!(value.split(',').any(|entry| entry == loopback));
+        }
     }
 
     #[test]

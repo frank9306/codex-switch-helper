@@ -63,6 +63,7 @@
 - 代理支持 `http` 和 `socks5`。
 - 保存代理后，本工具会立即使用该代理。
 - 代理通过进程环境传递给之后启动的 Codex 实例。
+- 启用代理时，`127.0.0.1`、`localhost` 和 `::1` 会绕过代理，确保 Codex 皮肤的本机 CDP 连接保持直连；已有的 `NO_PROXY` 配置会保留。
 - 新版本会清理旧版本曾写入的用户级 `HTTP_PROXY`、`HTTPS_PROXY` 和 `ALL_PROXY`。
 - 危险操作使用应用内确认弹窗。删除 Profile 时必须输入 Profile 名称。
 
@@ -124,4 +125,4 @@ npm run tauri:build
 
 发布前必须更新 `CHANGELOG.md`、`README.md` 和 `README.zh-CN.md`。
 
-当前版本：`0.2.5`。
+当前版本：`0.2.6`。

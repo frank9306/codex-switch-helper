@@ -63,6 +63,7 @@ The settings page contains Codex launch settings, proxy settings, Windows login 
 - Proxy supports `http` and `socks5`.
 - Saving proxy settings applies them to this helper app immediately.
 - Proxy settings are passed to newly launched Codex instances through their process environment.
+- When proxying is enabled, `127.0.0.1`, `localhost`, and `::1` bypass the proxy so local Codex skin CDP connections remain direct. Existing `NO_PROXY` entries are preserved.
 - The new behavior clears user-level `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` values written by older versions.
 - Dangerous operations use in-app confirmation dialogs. Deleting a Profile requires typing the Profile name.
 
@@ -124,4 +125,4 @@ npm run tauri:build
 
 Also update `CHANGELOG.md`, `README.md`, and `README.zh-CN.md` before tagging a release.
 
-Current release: `0.2.5`.
+Current release: `0.2.6`.
