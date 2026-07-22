@@ -13,11 +13,10 @@ Tauri desktop helper for switching Codex App profiles on Windows.
 - Manages multiple Codex Profiles with separate saved auth data.
 - Gives every Profile an isolated tool-managed Home.
 - Supports account-login Profiles and API-key Profiles.
-- Edits one global `~/.agents/AGENTS.md`, linked into every managed Profile Home, and lists `~/.agents/skills`.
-- Scans local session usage by Profile.
+- Edits and refreshes one global `~/.agents/AGENTS.md`, linked into every managed Profile Home.
+- Discovers Skills in both `~/.agents/skills` and `~/.codex/skills`, with a non-overwriting import into the shared directory.
 - Supports HTTP and SOCKS5 proxy settings for the helper app and Codex launches.
 - Runs multiple isolated Codex instances in parallel.
-- Supports an optional, independent Codex background skin for each Profile.
 - Keeps the helper responsive during active Codex tasks by performing Profile inspection, launch preparation, and process checks outside the UI event thread.
 - Provides protective confirmation dialogs for dangerous actions such as deleting Profiles or changing user-level environment variables.
 - Launches Profile instances through the packaged Codex desktop entry point and default instances through `shell:AppsFolder`.
@@ -46,16 +45,6 @@ Tauri desktop helper for switching Codex App profiles on Windows.
 - `默认启动 Codex` launches Codex without changing `CODEX_HOME` or `OPENAI_API_KEY`.
 - `恢复默认 Home` deletes user-level `CODEX_HOME`, so manual Codex launches fall back to the default home, usually `C:\Users\frank\.codex`.
 
-## Codex Skins
-
-- Select a PNG, JPEG, or WebP background from the Profile detail view and configure appearance, focus, safe area, and task-page behavior.
-- Skins use CDP bound to `127.0.0.1`; they do not modify the official Codex package, `app.asar`, or its signature.
-- Every Profile gets an independent CDP port and managed theme directory. Profiles without skins retain the original launch behavior.
-- Node.js 22 or newer must be available on `PATH`. Background files are limited to 16 MB and receive additional dimension and pixel-count validation at runtime.
-- Default Codex launches never enable a skin. Do not run untrusted local software while a skin session is active because another process under the same user may access the loopback debugging port.
-
-This feature incorporates software from [Fei-Away/Codex-Dream-Skin](https://github.com/Fei-Away/Codex-Dream-Skin), revision `e776fa6d5361a2bdd5c1614674397681e7b00874`, under the MIT License. This project does not redistribute upstream character, celebrity, franchise, or user-supplied artwork. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and the [upstream MIT License](src-tauri/resources/dream-skin/LICENSE). Neither Codex Dream Skin nor this project is an official OpenAI product.
-
 ## Settings And Proxy
 
 The settings page contains Codex launch settings, proxy settings, Windows login startup, and Light/Dark theme selection.
@@ -63,7 +52,7 @@ The settings page contains Codex launch settings, proxy settings, Windows login 
 - Proxy supports `http` and `socks5`.
 - Saving proxy settings applies them to this helper app immediately.
 - Proxy settings are passed to newly launched Codex instances through their process environment.
-- When proxying is enabled, `127.0.0.1`, `localhost`, and `::1` bypass the proxy so local Codex skin CDP connections remain direct. Existing `NO_PROXY` entries are preserved.
+- When proxying is enabled, `127.0.0.1`, `localhost`, and `::1` bypass the proxy. Existing `NO_PROXY` entries are preserved.
 - The new behavior clears user-level `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` values written by older versions.
 - Dangerous operations use in-app confirmation dialogs. Deleting a Profile requires typing the Profile name.
 

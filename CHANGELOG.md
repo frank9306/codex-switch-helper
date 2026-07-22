@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.7 - 2026-07-22
+
+- Split shared prompts and Skills into separate views, with search, source grouping, clearer rows, and an explicit refresh action.
+- Discovered Skills from both `~/.agents/skills` and `~/.codex/skills`, with a safe import action that never overwrites existing shared Skills.
+- Removed usage tracking, token statistics, and the local SQLite usage store from the app.
+- Removed per-Profile Codex skins and their background injection path so Profile launches stay focused on environment isolation.
+- Improved dark-theme contrast, compact status messages, responsive layouts, keyboard focus states, and confirmation-dialog accessibility.
+
 ## 0.2.6 - 2026-07-22
 
 - Bypassed proxy routing for `127.0.0.1`, `localhost`, and `::1` while preserving existing `NO_PROXY` entries, so local CDP skin connections remain direct when a Profile proxy is enabled.

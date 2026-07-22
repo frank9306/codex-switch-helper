@@ -10,23 +10,9 @@ import './style.css'
 type AuthMode = 'account' | 'apiKey'
 type ApiProvider = 'openai' | 'minimax' | 'deepseek' | 'custom'
 type Mode = 'detail' | 'new' | 'edit'
-type ActiveMenu = 'profiles' | 'resources' | 'usage' | 'settings' | 'about'
+type ActiveMenu = 'profiles' | 'resources' | 'settings' | 'about'
 type ProxyProtocol = 'http' | 'socks5'
 type Theme = 'light' | 'dark'
-type SkinAppearance = 'auto' | 'light' | 'dark'
-type SkinSafeArea = 'auto' | 'left' | 'right' | 'center' | 'none'
-type SkinTaskMode = 'auto' | 'ambient' | 'banner' | 'off'
-
-type ProfileSkinSettings = {
-  enabled: boolean
-  backgroundPath?: string
-  appearance: SkinAppearance
-  focusX: number
-  focusY: number
-  safeArea: SkinSafeArea
-  taskMode: SkinTaskMode
-}
-
 type ConfirmIntent = 'danger' | 'warning'
 
 type ConfirmRequest = {
@@ -85,7 +71,6 @@ type Profile = {
   createdAt: string
   updatedAt: string
   lastUsedAt?: string
-  skin: ProfileSkinSettings
 }
 
 type AppSettings = {
@@ -128,50 +113,16 @@ type ConnectionTestResult = {
   endpoint: string
 }
 
-type UsageProfileSummary = {
-  homePath: string
-  profileId?: string | null
-  profileName?: string | null
-  callCount: number
-  inputTokens: number
-  outputTokens: number
-  reasoningOutputTokens: number
-  totalTokens: number
-  lastUsedAt?: number | null
-  currentPlanType?: string | null
-  currentUsedPercent?: number | null
-  currentResetsAt?: number | null
-}
-
-type UsageSummary = {
-  totalCalls: number
-  totalTokens: number
-  totalInputTokens: number
-  totalOutputTokens: number
-  totalReasoningTokens: number
-  firstRecordedAt?: number | null
-  lastRecordedAt?: number | null
-  activeSessions: number
-  byProfile: UsageProfileSummary[]
-}
-
-type UsageSessionInfo = {
-  sessionId: string
-  homePath: string
-  profileId?: string | null
-  profileName?: string | null
-  cwd?: string | null
-  firstRecordedAt: number
-  lastRecordedAt: number
-  callCount: number
-  totalTokens: number
-}
-
 type SharedResources = {
   agentsPath: string
   agentsContent: string
-  skillsPath: string
-  skills: Array<{ name: string; path: string; description?: string | null }>
+  skillsPaths: string[]
+  skills: Array<{ name: string; path: string; source: string; shared: boolean; description?: string | null }>
+}
+
+type SkillImportResult = {
+  imported: number
+  skipped: number
 }
 
 type CodexInstance = {
@@ -179,18 +130,6 @@ type CodexInstance = {
   profileName: string
   pid: number
   startedAt: string
-}
-
-function formatNumber(value?: number | null) {
-  return typeof value === 'number' ? value.toLocaleString() : '无'
-}
-
-function formatTime(value?: number | null) {
-  return typeof value === 'number' ? new Date(value * 1000).toLocaleString() : '无'
-}
-
-function formatPercent(value?: number | null) {
-  return typeof value === 'number' ? `${Math.round(value)}%` : '无'
 }
 
 function App() {
@@ -221,9 +160,6 @@ function App() {
   const [updateProgress, setUpdateProgress] = useState('')
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
   const [loadingLabel, setLoadingLabel] = useState('')
-  const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null)
-  const [usageSessions, setUsageSessions] = useState<UsageSessionInfo[]>([])
-  const [usageBusy, setUsageBusy] = useState(false)
   const [resources, setResources] = useState<SharedResources | null>(null)
   const [agentsDraft, setAgentsDraft] = useState('')
   const [instances, setInstances] = useState<CodexInstance[]>([])
@@ -349,18 +285,8 @@ function App() {
   }, [activeMenu, state])
 
   useEffect(() => {
-    if (activeMenu !== 'usage' || usageSummary) return
-    refreshUsage(false)
-  }, [activeMenu, usageSummary])
-
-  useEffect(() => {
     if (activeMenu !== 'resources' || resources) return
-    invoke<SharedResources>('get_shared_resources')
-      .then((value) => {
-        setResources(value)
-        setAgentsDraft(value.agentsContent)
-      })
-      .catch((error) => setMessage(String(error)))
+    refreshResources(false)
   }, [activeMenu, resources])
 
   useEffect(() => {
@@ -634,34 +560,31 @@ function App() {
     }, '正在打开目录...')
   }
 
-  async function saveProfileSkin(profileId: string, skin: ProfileSkinSettings, selectedImagePath?: string) {
-    await runAction(async () => {
-      await invoke<Profile>('update_profile_skin', {
-        profileId,
-        skin,
-        selectedImagePath: selectedImagePath || null,
-      })
-      await loadState()
-      return skin.enabled ? '已保存皮肤设置，下次启动此 Profile 时生效。' : '已关闭此 Profile 的皮肤。'
-    }, '正在保存皮肤设置...')
+  async function refreshResources(notify = true) {
+    setBusy(true)
+    setLoadingLabel('正在刷新共享资源...')
+    if (notify) setMessage('')
+    try {
+      const next = await invoke<SharedResources>('get_shared_resources')
+      setResources(next)
+      setAgentsDraft(next.agentsContent)
+      if (notify) setMessage('共享资源已刷新。')
+    } catch (error) {
+      setMessage(`刷新共享资源失败：${String(error)}`)
+    } finally {
+      setBusy(false)
+      setLoadingLabel('')
+    }
   }
 
-  async function refreshUsage(scan: boolean) {
-    setUsageBusy(true)
-    setMessage('')
-    try {
-      const summary = scan
-        ? await invoke<UsageSummary>('scan_usage')
-        : await invoke<UsageSummary>('get_usage_summary')
-      const sessions = await invoke<UsageSessionInfo[]>('get_usage_sessions', { limit: 12 })
-      setUsageSummary(summary)
-      setUsageSessions(sessions)
-      if (scan) setMessage('用量扫描完成。')
-    } catch (error) {
-      setMessage(`读取用量失败：${String(error)}`)
-    } finally {
-      setUsageBusy(false)
-    }
+  async function importCodexSkills() {
+    await runAction(async () => {
+      const result = await invoke<SkillImportResult>('import_codex_skills')
+      const next = await invoke<SharedResources>('get_shared_resources')
+      setResources(next)
+      setAgentsDraft(next.agentsContent)
+      return `Skills 导入完成：新增 ${result.imported} 个，跳过同名 ${result.skipped} 个。`
+    }, '正在导入 ~/.codex/skills...')
   }
 
   async function saveAgents() {
@@ -716,8 +639,6 @@ function App() {
     { label: '作者', value: 'Frank' },
     { label: '项目', value: 'Codex Switch Helper' },
     { label: '仓库', value: 'https://github.com/frank9306/codex-switch-helper', href: 'https://github.com/frank9306/codex-switch-helper' },
-    { label: '皮肤来源', value: 'Fei-Away/Codex-Dream-Skin', href: 'https://github.com/Fei-Away/Codex-Dream-Skin' },
-    { label: '皮肤许可', value: 'MIT License，上游 commit e776fa6d' },
     { label: '定位', value: '本地 Codex Profile 管理工具' },
     { label: '版本', value: appVersion || '未知' },
   ]
@@ -730,9 +651,6 @@ function App() {
   return (
     <main className="shell">
       <aside className="side-rail" aria-label="主导航">
-        <span className="rail-dot rail-close" />
-        <span className="rail-dot rail-minimize" />
-        <span className="rail-dot rail-zoom" />
         <button
           className={`rail-item ${activeMenu === 'profiles' ? 'active' : ''}`}
           type="button"
@@ -748,14 +666,6 @@ function App() {
           onClick={() => setActiveMenu('resources')}
         >
           A
-        </button>
-        <button
-          className={`rail-item ${activeMenu === 'usage' ? 'active' : ''}`}
-          type="button"
-          aria-label="Usage"
-          onClick={() => setActiveMenu('usage')}
-        >
-          U
         </button>
         <button
           className={`rail-item ${activeMenu === 'settings' ? 'active' : ''}`}
@@ -781,7 +691,7 @@ function App() {
             <span className="brand-mark">C</span>
             <div>
               <p className="eyebrow">Codex Switch Helper</p>
-              <h1>{activeMenu === 'about' ? '关于' : activeMenu === 'settings' ? '设置' : activeMenu === 'resources' ? '共享资源' : activeMenu === 'usage' ? '用量' : 'Profiles'}</h1>
+              <h1>{activeMenu === 'about' ? '关于' : activeMenu === 'settings' ? '设置' : activeMenu === 'resources' ? '共享资源' : 'Profiles'}</h1>
             </div>
           </div>
           {activeMenu === 'profiles' && (
@@ -796,7 +706,7 @@ function App() {
           )}
         </section>
 
-        {message && <div className="message">{message}</div>}
+        {message && <div className="message" role="status" aria-live="polite">{message}</div>}
 
         {activeMenu === 'profiles' ? (
           <>
@@ -910,7 +820,6 @@ function App() {
                     onLaunch={() => launchProfile(selectedProfile.id)}
                     onTest={() => testProfile(selectedProfile.id)}
                     onReveal={() => revealProfile(selectedProfile.id)}
-                    onSaveSkin={(skin, selectedImagePath) => saveProfileSkin(selectedProfile.id, skin, selectedImagePath)}
                     onStop={stopInstance}
                   />
                 ) : (
@@ -931,15 +840,9 @@ function App() {
             draft={agentsDraft}
             resources={resources}
             onChange={setAgentsDraft}
+            onImport={importCodexSkills}
+            onRefresh={() => refreshResources(true)}
             onSave={saveAgents}
-          />
-        ) : activeMenu === 'usage' ? (
-          <UsageDashboard
-            busy={usageBusy}
-            summary={usageSummary}
-            sessions={usageSessions}
-            onRefresh={() => refreshUsage(false)}
-            onScan={() => refreshUsage(true)}
           />
         ) : activeMenu === 'settings' ? (
           <section className="settings-grid">
@@ -1070,9 +973,9 @@ function App() {
           onConfirm={confirmAndClose}
         />
       )}
-      {(busy || usageBusy || updateBusy) && (
+      {(busy || updateBusy) && (
         <div className="loading-toast" role="status" aria-live="polite">
-          <LoadingIndicator label={loadingLabel || (usageBusy ? '正在读取用量...' : updateProgress || '正在检查更新...')} />
+          <LoadingIndicator label={loadingLabel || updateProgress || '正在检查更新...'} />
         </div>
       )}
     </main>
@@ -1084,209 +987,115 @@ function ResourcesPanel(props: {
   draft: string
   resources: SharedResources | null
   onChange: (value: string) => void
+  onImport: () => void
+  onRefresh: () => void
   onSave: () => void
 }) {
+  const [activeResourceView, setActiveResourceView] = useState<'prompt' | 'skills'>('prompt')
+  const [skillQuery, setSkillQuery] = useState('')
   if (!props.resources) {
     return <section className="panel resource-loading"><LoadingIndicator label="正在读取共享资源..." /></section>
   }
+  const normalizedQuery = skillQuery.trim().toLocaleLowerCase()
+  const filteredSkills = props.resources.skills.filter((skill) => (
+    !normalizedQuery
+    || skill.name.toLocaleLowerCase().includes(normalizedQuery)
+    || skill.description?.toLocaleLowerCase().includes(normalizedQuery)
+    || skill.path.toLocaleLowerCase().includes(normalizedQuery)
+  ))
+  const skillGroups = [
+    { key: 'shared', title: '全局共享', description: '~/.agents/skills，可供所有 Profile 使用', skills: filteredSkills.filter((skill) => skill.shared) },
+    { key: 'legacy', title: '默认 Home', description: '~/.codex/skills，可导入全局共享目录', skills: filteredSkills.filter((skill) => !skill.shared) },
+  ].filter((group) => group.skills.length > 0)
+
   return (
-    <section className="resources-grid">
-      <section className="panel resource-editor resource-card">
-        <div className="resource-card-kicker"><span className="resource-icon">A</span><span>全局指令</span></div>
-        <div className="panel-header">
-          <div className="section-title">
-            <h2>AGENTS.md</h2>
-            <code>{props.resources?.agentsPath || '~/.agents/AGENTS.md'}</code>
-          </div>
-          <button className="primary-action compact" disabled={props.busy} onClick={props.onSave} type="button">
-            保存
+    <section className="panel resource-workspace">
+      <div className="resource-workspace-toolbar">
+        <div className="segmented resource-tabs" role="tablist" aria-label="共享资源类型">
+          <button className={activeResourceView === 'prompt' ? 'active' : ''} onClick={() => setActiveResourceView('prompt')} role="tab" aria-selected={activeResourceView === 'prompt'} type="button">
+            全局提示词
+          </button>
+          <button className={activeResourceView === 'skills' ? 'active' : ''} onClick={() => setActiveResourceView('skills')} role="tab" aria-selected={activeResourceView === 'skills'} type="button">
+            Skills <span className="tab-count">{props.resources.skills.length}</span>
           </button>
         </div>
-        <textarea
-          aria-label="AGENTS.md 内容"
-          className="agents-editor"
-          onChange={(event) => props.onChange(event.target.value)}
-          spellCheck={false}
-          value={props.draft}
-        />
-      </section>
-      <section className="panel skills-panel resource-card">
-        <div className="resource-card-kicker"><span className="resource-icon skills">S</span><span>{props.resources?.skills.length || 0} 个 Skills</span></div>
-        <div className="section-title">
-          <h2>Skills</h2>
-          <code>{props.resources?.skillsPath || '~/.agents/skills'}</code>
+        <button className="secondary-action compact" disabled={props.busy} onClick={props.onRefresh} type="button">
+          刷新磁盘内容
+        </button>
+      </div>
+
+      {activeResourceView === 'prompt' ? (
+        <div className="resource-view" role="tabpanel">
+          <div className="panel-header resource-view-heading">
+            <div className="section-title">
+              <div className="resource-title-line"><span className="resource-icon">A</span><h2>AGENTS.md</h2></div>
+              <p>所有托管 Profile 共用的全局提示词。</p>
+              <code>{props.resources.agentsPath || '~/.agents/AGENTS.md'}</code>
+            </div>
+            <button className="primary-action compact" disabled={props.busy} onClick={props.onSave} type="button">
+              保存提示词
+            </button>
+          </div>
+          <textarea
+            aria-label="AGENTS.md 内容"
+            className="agents-editor"
+            onChange={(event) => props.onChange(event.target.value)}
+            spellCheck={false}
+            value={props.draft}
+          />
         </div>
-        <div className="skills-list skill-card-grid">
-          {props.resources?.skills.length ? props.resources.skills.map((skill) => (
-            <article className="skill-row" key={skill.path}>
-              <strong>{skill.name}</strong>
-              {skill.description && <p>{skill.description}</p>}
-              <code>{skill.path}</code>
-            </article>
-          )) : <p className="empty">未发现 skills。</p>}
+      ) : (
+        <div className="resource-view skills-view" role="tabpanel">
+          <div className="skills-view-heading">
+            <div className="section-title">
+              <div className="resource-title-line"><span className="resource-icon skills">S</span><h2>Skills</h2></div>
+              <p>按安装来源分组，搜索名称、说明或路径。</p>
+            </div>
+            <div className="skills-view-actions">
+              <input aria-label="搜索 Skills" onChange={(event) => setSkillQuery(event.target.value)} placeholder="搜索 Skills" type="search" value={skillQuery} />
+              <button className="secondary-action compact" disabled={props.busy} onClick={props.onImport} type="button">
+                导入 ~/.codex
+              </button>
+            </div>
+          </div>
+          <div className="skill-source-paths">
+            {props.resources.skillsPaths.map((path) => <code key={path}>{path}</code>)}
+          </div>
+          <div className="skill-groups">
+            {skillGroups.length ? skillGroups.map((group) => (
+              <section className="skill-group" key={group.key}>
+                <header className="skill-group-heading">
+                  <div>
+                    <h3>{group.title}</h3>
+                    <p>{group.description}</p>
+                  </div>
+                  <span>{group.skills.length}</span>
+                </header>
+                <div className="skill-list">
+                  {group.skills.map((skill) => (
+                    <article className="skill-list-row" key={skill.path}>
+                      <div className="skill-identity">
+                        <strong>{skill.name}</strong>
+                        <span className={`skill-source ${skill.shared ? 'shared' : 'legacy'}`}>{skill.source}</span>
+                      </div>
+                      <div className="skill-detail">
+                        <p>{skill.description || '未提供说明'}</p>
+                        <code>{skill.path}</code>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </section>
+            )) : <div className="empty-state skill-empty"><h2>没有匹配的 Skills</h2><p>尝试缩短关键词或刷新磁盘内容。</p></div>}
+          </div>
         </div>
-      </section>
+      )}
     </section>
   )
 }
 
 function LoadingIndicator(props: { label: string }) {
   return <span className="loading-indicator"><span className="spinner" aria-hidden="true" />{props.label}</span>
-}
-
-function UsageDashboard(props: {
-  busy: boolean
-  summary: UsageSummary | null
-  sessions: UsageSessionInfo[]
-  onRefresh: () => void
-  onScan: () => void
-}) {
-  const summaryStats = props.summary
-    ? [
-        { label: '调用数', value: formatNumber(props.summary.totalCalls), tone: 'blue' },
-        { label: '总 Tokens', value: formatNumber(props.summary.totalTokens), tone: 'green' },
-        { label: '输入 Tokens', value: formatNumber(props.summary.totalInputTokens), tone: 'cyan' },
-        { label: '输出 Tokens', value: formatNumber(props.summary.totalOutputTokens), tone: 'purple' },
-        { label: '活跃会话', value: formatNumber(props.summary.activeSessions), tone: 'mint' },
-      ]
-    : []
-
-  return (
-    <section className="usage-grid">
-      <section className="panel usage-summary-panel">
-        <div className="panel-header">
-          <div className="section-title">
-            <h2>Codex 用量</h2>
-            <p>只统计通过本工具启动 Profile 后产生的新记录；旧记录和默认 Home 不计入。</p>
-          </div>
-          <div className="header-actions">
-            <button className="secondary-action compact" disabled={props.busy} onClick={props.onRefresh} type="button">
-              刷新
-            </button>
-            <button className="primary-action compact" disabled={props.busy} onClick={props.onScan} type="button">
-              {props.busy ? '扫描中...' : '扫描用量'}
-            </button>
-          </div>
-        </div>
-
-        {props.summary ? (
-          <>
-            <div className="usage-stat-grid">
-              {summaryStats.map((item) => (
-                <article className="stat-card usage-stat-card" key={item.label}>
-                  <span className={`stat-icon ${item.tone}`}>#</span>
-                  <div>
-                    <p>{item.label}</p>
-                    <strong>{item.value}</strong>
-                  </div>
-                </article>
-              ))}
-            </div>
-            <dl className="usage-facts">
-              <div>
-                <dt>首次记录</dt>
-                <dd>{formatTime(props.summary.firstRecordedAt)}</dd>
-              </div>
-              <div>
-                <dt>最后记录</dt>
-                <dd>{formatTime(props.summary.lastRecordedAt)}</dd>
-              </div>
-              <div>
-                <dt>推理 Tokens</dt>
-                <dd>{formatNumber(props.summary.totalReasoningTokens)}</dd>
-              </div>
-            </dl>
-          </>
-        ) : (
-          <div className="empty-state usage-empty">
-            <h2>还没有用量数据</h2>
-            <p>点击“扫描用量”读取本地 Codex session 文件并生成统计。</p>
-            <button className="primary-action" disabled={props.busy} onClick={props.onScan} type="button">
-              扫描用量
-            </button>
-          </div>
-        )}
-      </section>
-
-      <section className="panel usage-profile-panel">
-        <div className="section-title">
-          <h2>Profile 分布</h2>
-          <p>按独立托管目录归属到 Profile。</p>
-        </div>
-        <div className="usage-profile-list">
-          {props.summary?.byProfile.length ? (
-            props.summary.byProfile.map((profile) => (
-              <article className="usage-profile-card" key={profile.profileId || profile.homePath}>
-                <div className="usage-profile-heading">
-                  <strong>{profile.profileName || '未匹配 Home'}</strong>
-                  <span>{profile.currentPlanType || '无计划信息'}</span>
-                </div>
-                <div className="usage-meter" aria-label="额度使用百分比">
-                  <span style={{ width: `${Math.max(0, Math.min(profile.currentUsedPercent || 0, 100))}%` }} />
-                </div>
-                <dl>
-                  <div>
-                    <dt>会话数</dt>
-                    <dd>{formatNumber(profile.callCount)}</dd>
-                  </div>
-                  <div>
-                    <dt>总 Tokens</dt>
-                    <dd>{formatNumber(profile.totalTokens)}</dd>
-                  </div>
-                  <div>
-                    <dt>当前额度</dt>
-                    <dd>{formatPercent(profile.currentUsedPercent)}</dd>
-                  </div>
-                  <div>
-                    <dt>重置时间</dt>
-                    <dd>{formatTime(profile.currentResetsAt)}</dd>
-                  </div>
-                </dl>
-                <code>{profile.homePath}</code>
-              </article>
-            ))
-          ) : (
-            <p className="empty">暂无 Profile 用量。</p>
-          )}
-        </div>
-      </section>
-
-      <section className="panel usage-session-panel">
-        <div className="section-title">
-          <h2>最近会话</h2>
-          <p>用于快速定位 token 异常的 session。</p>
-        </div>
-        <div className="usage-session-list">
-          {props.sessions.length ? (
-            props.sessions.map((session) => (
-              <article className="usage-session-row" key={`${session.homePath}-${session.sessionId}`}>
-                <div>
-                  <strong>{session.profileName || '未匹配 Home'}</strong>
-                  <span>{session.cwd || session.homePath}</span>
-                </div>
-                <dl>
-                  <div>
-                    <dt>调用</dt>
-                    <dd>{formatNumber(session.callCount)}</dd>
-                  </div>
-                  <div>
-                    <dt>Tokens</dt>
-                    <dd>{formatNumber(session.totalTokens)}</dd>
-                  </div>
-                  <div>
-                    <dt>最后记录</dt>
-                    <dd>{formatTime(session.lastRecordedAt)}</dd>
-                  </div>
-                </dl>
-              </article>
-            ))
-          ) : (
-            <p className="empty">暂无最近会话。</p>
-          )}
-        </div>
-      </section>
-    </section>
-  )
 }
 
 function ConfirmDialog(props: {
@@ -1296,8 +1105,55 @@ function ConfirmDialog(props: {
   onConfirm: () => void
 }) {
   const [typedText, setTypedText] = useState('')
+  const dialogRef = useRef<HTMLElement>(null)
+  const busyRef = useRef(props.busy)
+  const onCancelRef = useRef(props.onCancel)
   const requireText = props.request.requireText
   const canConfirm = !requireText || typedText === requireText
+  busyRef.current = props.busy
+  onCancelRef.current = props.onCancel
+
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const dialog = dialogRef.current
+    if (!dialog) return
+
+    const getFocusableElements = () => Array.from(dialog.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ))
+    const initialFocus = requireText
+      ? dialog.querySelector<HTMLInputElement>('input')
+      : dialog.querySelector<HTMLButtonElement>('.secondary-action')
+    initialFocus?.focus()
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape' && !busyRef.current) {
+        event.preventDefault()
+        onCancelRef.current()
+        return
+      }
+      if (event.key !== 'Tab') return
+
+      const focusableElements = getFocusableElements()
+      if (!focusableElements.length) return
+      const first = focusableElements[0]
+      const last = focusableElements[focusableElements.length - 1]
+
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+
+    dialog.addEventListener('keydown', handleKeyDown)
+    return () => {
+      dialog.removeEventListener('keydown', handleKeyDown)
+      previousFocus?.focus()
+    }
+  }, [requireText])
 
   return (
     <div className="confirm-backdrop" role="presentation">
@@ -1306,6 +1162,7 @@ function ConfirmDialog(props: {
         aria-labelledby="confirm-title"
         aria-modal="true"
         className={`confirm-dialog ${props.request.intent}`}
+        ref={dialogRef}
         role="dialog"
       >
         <div className="confirm-icon">{props.request.intent === 'danger' ? '!' : '?'}</div>
@@ -1473,34 +1330,8 @@ function ProfileDetail(props: {
   onLaunch: () => void
   onTest: () => void
   onReveal: () => void
-  onSaveSkin: (skin: ProfileSkinSettings, selectedImagePath?: string) => Promise<void>
   onStop: (pid: number) => void
 }) {
-  const defaultSkin: ProfileSkinSettings = {
-    enabled: false,
-    appearance: 'auto',
-    focusX: 0.5,
-    focusY: 0.5,
-    safeArea: 'auto',
-    taskMode: 'auto',
-  }
-  const [skinDraft, setSkinDraft] = useState<ProfileSkinSettings>(props.profile.skin || defaultSkin)
-  const [selectedSkinImage, setSelectedSkinImage] = useState('')
-
-  useEffect(() => {
-    setSkinDraft(props.profile.skin || defaultSkin)
-    setSelectedSkinImage('')
-  }, [props.profile.id, props.profile.updatedAt])
-
-  async function chooseSkinImage() {
-    const selected = await open({
-      directory: false,
-      multiple: false,
-      filters: [{ name: '背景图片', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
-    })
-    if (typeof selected === 'string') setSelectedSkinImage(selected)
-  }
-
   return (
     <div className="form-shell">
       <div className="panel-header">
@@ -1527,93 +1358,7 @@ function ProfileDetail(props: {
             <dd>{props.inspection?.hasAuthJson ? '已登录' : '待登录'}</dd>
           </div>
         )}
-        <div>
-          <dt>Codex 皮肤</dt>
-          <dd>{props.profile.skin?.enabled ? '已启用' : '未启用'}</dd>
-        </div>
       </dl>
-
-      <section className="skin-settings">
-        <div className="skin-settings-heading">
-          <div className="section-title">
-            <h3>Codex 皮肤</h3>
-            <p>为此 Profile 启用独立背景，通过本机 CDP 注入，不修改官方安装包。</p>
-          </div>
-          <label className="toggle-row compact-toggle">
-            <input
-              type="checkbox"
-              checked={skinDraft.enabled}
-              onChange={(event) => setSkinDraft({ ...skinDraft, enabled: event.target.checked })}
-            />
-            <span>{skinDraft.enabled ? '已启用' : '未启用'}</span>
-          </label>
-        </div>
-
-        <div className="skin-image-row">
-          <div>
-            <span>背景图</span>
-            <code>{selectedSkinImage || skinDraft.backgroundPath || '尚未选择'}</code>
-          </div>
-          <button className="secondary-action" disabled={props.busy} onClick={chooseSkinImage} type="button">
-            选择图片
-          </button>
-        </div>
-
-        <div className="skin-options-grid">
-          <label>
-            <span>外观</span>
-            <select value={skinDraft.appearance} onChange={(event) => setSkinDraft({ ...skinDraft, appearance: event.target.value as SkinAppearance })}>
-              <option value="auto">自动</option>
-              <option value="light">浅色</option>
-              <option value="dark">深色</option>
-            </select>
-          </label>
-          <label>
-            <span>内容安全区</span>
-            <select value={skinDraft.safeArea} onChange={(event) => setSkinDraft({ ...skinDraft, safeArea: event.target.value as SkinSafeArea })}>
-              <option value="auto">自动</option>
-              <option value="left">左侧</option>
-              <option value="right">右侧</option>
-              <option value="center">居中</option>
-              <option value="none">不保留</option>
-            </select>
-          </label>
-          <label>
-            <span>任务页背景</span>
-            <select value={skinDraft.taskMode} onChange={(event) => setSkinDraft({ ...skinDraft, taskMode: event.target.value as SkinTaskMode })}>
-              <option value="auto">自动</option>
-              <option value="ambient">环境背景</option>
-              <option value="banner">顶部横幅</option>
-              <option value="off">关闭</option>
-            </select>
-          </label>
-        </div>
-
-        <div className="skin-focus-grid">
-          <label>
-            <span>水平焦点 {Math.round(skinDraft.focusX * 100)}%</span>
-            <input min="0" max="1" step="0.01" type="range" value={skinDraft.focusX} onChange={(event) => setSkinDraft({ ...skinDraft, focusX: Number(event.target.value) })} />
-          </label>
-          <label>
-            <span>垂直焦点 {Math.round(skinDraft.focusY * 100)}%</span>
-            <input min="0" max="1" step="0.01" type="range" value={skinDraft.focusY} onChange={(event) => setSkinDraft({ ...skinDraft, focusY: Number(event.target.value) })} />
-          </label>
-        </div>
-
-        <div className="skin-settings-footer">
-          <p>
-            功能基于 <a href="https://github.com/Fei-Away/Codex-Dream-Skin" rel="noreferrer" target="_blank">Fei-Away/Codex-Dream-Skin</a>，遵循 MIT License。请确保所选图片拥有合法使用权。
-          </p>
-          <button
-            className="secondary-action"
-            disabled={props.busy || (skinDraft.enabled && !selectedSkinImage && !skinDraft.backgroundPath)}
-            onClick={() => props.onSaveSkin(skinDraft, selectedSkinImage || undefined)}
-            type="button"
-          >
-            保存皮肤设置
-          </button>
-        </div>
-      </section>
 
       <div className="actions">
         <button className="primary-action" disabled={props.busy} onClick={props.onLaunch} type="button">

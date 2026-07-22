@@ -1,9 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod dream_skin;
-mod models;
-mod modules;
-
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 #[cfg(windows)]
@@ -91,53 +87,6 @@ struct Profile {
     created_at: String,
     updated_at: String,
     last_used_at: Option<String>,
-    #[serde(default)]
-    skin: ProfileSkinSettings,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProfileSkinSettings {
-    #[serde(default)]
-    enabled: bool,
-    background_path: Option<String>,
-    #[serde(default = "default_skin_appearance")]
-    appearance: String,
-    #[serde(default = "default_skin_focus")]
-    focus_x: f64,
-    #[serde(default = "default_skin_focus")]
-    focus_y: f64,
-    #[serde(default = "default_skin_safe_area")]
-    safe_area: String,
-    #[serde(default = "default_skin_task_mode")]
-    task_mode: String,
-}
-
-impl Default for ProfileSkinSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            background_path: None,
-            appearance: default_skin_appearance(),
-            focus_x: default_skin_focus(),
-            focus_y: default_skin_focus(),
-            safe_area: default_skin_safe_area(),
-            task_mode: default_skin_task_mode(),
-        }
-    }
-}
-
-fn default_skin_appearance() -> String {
-    "auto".to_string()
-}
-fn default_skin_focus() -> f64 {
-    0.5
-}
-fn default_skin_safe_area() -> String {
-    "auto".to_string()
-}
-fn default_skin_task_mode() -> String {
-    "auto".to_string()
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
@@ -215,6 +164,8 @@ struct ConnectionTestResult {
 struct SkillInfo {
     name: String,
     path: String,
+    source: String,
+    shared: bool,
     description: Option<String>,
 }
 
@@ -223,8 +174,15 @@ struct SkillInfo {
 struct SharedResources {
     agents_path: String,
     agents_content: String,
-    skills_path: String,
+    skills_paths: Vec<String>,
     skills: Vec<SkillInfo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillImportResult {
+    imported: usize,
+    skipped: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -234,8 +192,6 @@ struct CodexInstance {
     profile_name: String,
     pid: u32,
     started_at: String,
-    skin_injector_pid: Option<u32>,
-    skin_cdp_port: Option<u16>,
 }
 
 static CODEX_INSTANCES: OnceLock<Mutex<Vec<CodexInstance>>> = OnceLock::new();
@@ -419,116 +375,6 @@ fn update_profile(
 }
 
 #[tauri::command]
-fn update_profile_skin(
-    app: AppHandle,
-    profile_id: String,
-    mut skin: ProfileSkinSettings,
-    selected_image_path: Option<String>,
-) -> Result<Profile, String> {
-    validate_skin_settings(&skin)?;
-    let mut data = load_data(&app)?;
-    let profile = data
-        .profiles
-        .iter_mut()
-        .find(|profile| profile.id == profile_id)
-        .ok_or_else(|| "Profile 不存在。".to_string())?;
-    if let Some(selected) = normalize_optional_string(selected_image_path) {
-        let source = PathBuf::from(selected);
-        let metadata = fs::metadata(&source).map_err(format_io_error)?;
-        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > 16 * 1024 * 1024 {
-            return Err("皮肤背景必须是 1 字节到 16 MB 的图片文件。".to_string());
-        }
-        let extension = source
-            .extension()
-            .and_then(|value| value.to_str())
-            .map(str::to_ascii_lowercase)
-            .filter(|value| matches!(value.as_str(), "png" | "jpg" | "jpeg" | "webp"))
-            .ok_or_else(|| "皮肤背景仅支持 PNG、JPEG 或 WebP。".to_string())?;
-        let theme_dir = Path::new(&profile.home_path)
-            .join(".codex-switch-helper")
-            .join("dream-skin");
-        fs::create_dir_all(&theme_dir).map_err(format_io_error)?;
-        let destination = theme_dir.join(format!("background.{extension}"));
-        let temporary = theme_dir.join(format!(".background-{}.tmp", Uuid::new_v4()));
-        fs::copy(&source, &temporary).map_err(format_io_error)?;
-        if destination.exists() {
-            fs::remove_file(&destination).map_err(format_io_error)?;
-        }
-        fs::rename(&temporary, &destination).map_err(format_io_error)?;
-        skin.background_path = Some(path_to_string(&destination)?);
-    } else if skin.background_path.is_none() {
-        skin.background_path = profile.skin.background_path.clone();
-    }
-    if skin.enabled && skin.background_path.is_none() {
-        return Err("启用皮肤前请先选择背景图。".to_string());
-    }
-    profile.skin = skin;
-    profile.updated_at = Utc::now().to_rfc3339();
-    let updated = profile.clone();
-    save_data(&app, &data)?;
-    Ok(updated)
-}
-
-fn validate_skin_settings(skin: &ProfileSkinSettings) -> Result<(), String> {
-    if !matches!(skin.appearance.as_str(), "auto" | "light" | "dark") {
-        return Err("皮肤外观只能是 auto、light 或 dark。".to_string());
-    }
-    if !(0.0..=1.0).contains(&skin.focus_x) || !(0.0..=1.0).contains(&skin.focus_y) {
-        return Err("皮肤焦点必须在 0 到 1 之间。".to_string());
-    }
-    if !matches!(
-        skin.safe_area.as_str(),
-        "auto" | "left" | "right" | "center" | "none"
-    ) {
-        return Err("皮肤安全区设置无效。".to_string());
-    }
-    if !matches!(
-        skin.task_mode.as_str(),
-        "auto" | "ambient" | "banner" | "off"
-    ) {
-        return Err("皮肤任务页模式无效。".to_string());
-    }
-    Ok(())
-}
-
-fn write_skin_theme(profile: &Profile, theme_dir: &Path) -> Result<(), String> {
-    validate_skin_settings(&profile.skin)?;
-    let background = PathBuf::from(
-        profile
-            .skin
-            .background_path
-            .as_deref()
-            .ok_or_else(|| "皮肤背景图未配置。".to_string())?,
-    );
-    let image_name = background
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| "皮肤背景文件名无效。".to_string())?;
-    if background.parent() != Some(theme_dir) {
-        return Err("皮肤背景不在此 Profile 的受管主题目录中。".to_string());
-    }
-    fs::create_dir_all(theme_dir).map_err(format_io_error)?;
-    let theme = serde_json::json!({
-        "schemaVersion": 1,
-        "id": format!("profile-{}", profile.id),
-        "name": profile.name,
-        "image": image_name,
-        "appearance": profile.skin.appearance,
-        "art": {
-            "focusX": profile.skin.focus_x,
-            "focusY": profile.skin.focus_y,
-            "safeArea": profile.skin.safe_area,
-            "taskMode": profile.skin.task_mode,
-        }
-    });
-    fs::write(
-        theme_dir.join("theme.json"),
-        serde_json::to_string_pretty(&theme).map_err(|error| error.to_string())?,
-    )
-    .map_err(format_io_error)
-}
-
-#[tauri::command]
 fn delete_profile(app: AppHandle, profile_id: String) -> Result<(), String> {
     let mut data = load_data(&app)?;
     let profile = find_profile(&data, &profile_id)?.clone();
@@ -698,75 +544,16 @@ fn launch_codex_blocking(app: AppHandle, profile_id: String) -> Result<CodexInst
         .ok_or_else(|| "未找到 Codex 桌面应用入口，无法启动独立实例。".to_string())?;
     let app_user_data = app_data_dir(&app)?.join("codex-app-data").join(&profile_id);
     fs::create_dir_all(&app_user_data).map_err(format_io_error)?;
-    let skin = data.profiles[profile_index].skin.clone();
-    let skin_runtime = app
-        .path()
-        .resource_dir()
-        .map_err(|error| error.to_string())?
-        .join("dream-skin");
-    let skin_theme_dir = home_path.join(".codex-switch-helper").join("dream-skin");
-    let skin_launch = if skin.enabled {
-        let background = skin
-            .background_path
-            .as_deref()
-            .ok_or_else(|| "此 Profile 已启用皮肤，但尚未选择背景图。".to_string())?;
-        if !Path::new(background).is_file() {
-            return Err("此 Profile 的皮肤背景图不存在，请重新选择。".to_string());
-        }
-        write_skin_theme(&data.profiles[profile_index], &skin_theme_dir)?;
-        let node = dream_skin::validate_node()?;
-        let port = dream_skin::reserve_loopback_port()?;
-        Some((node, port))
-    } else {
-        None
-    };
     let mut command = hidden_command(executable.to_string_lossy().as_ref());
     command
         .arg(user_data_dir_arg(&app_user_data))
         .env(CODEX_HOME_ENV_KEY, &home_path);
-    if let Some((_, port)) = skin_launch.as_ref() {
-        command
-            .arg("--remote-debugging-address=127.0.0.1")
-            .arg(format!("--remote-debugging-port={port}"));
-    }
     apply_profile_process_env(&mut command, &data.profiles[profile_index])?;
     apply_proxy_process_env(&mut command, &data.settings)?;
-    let mut child = command.spawn().map_err(format_io_error)?;
-    let (skin_injector_pid, skin_cdp_port) = if let Some((node, port)) = skin_launch {
-        let browser_id =
-            match dream_skin::wait_for_browser_id(port, std::time::Duration::from_secs(30)) {
-                Ok(browser_id) => browser_id,
-                Err(error) => {
-                    let _ = child.kill();
-                    return Err(error);
-                }
-            };
-        let injector = match dream_skin::start_injector(
-            &node,
-            &skin_runtime,
-            &skin_theme_dir,
-            &home_path.join(".codex-switch-helper").join("logs"),
-            port,
-            &browser_id,
-        ) {
-            Ok(injector) => injector,
-            Err(error) => {
-                let _ = child.kill();
-                return Err(error);
-            }
-        };
-        (Some(injector.id()), Some(port))
-    } else {
-        (None, None)
-    };
+    let child = command.spawn().map_err(format_io_error)?;
 
     let launched_at = Utc::now();
     let now = launched_at.to_rfc3339();
-    open_usage_db(&app)?.record_profile_launch(
-        &profile_id,
-        &data.profiles[profile_index].home_path,
-        launched_at.timestamp(),
-    )?;
     data.profiles[profile_index].last_used_at = Some(now.clone());
     data.profiles[profile_index].updated_at = now.clone();
     data.active_profile_id = Some(profile_id.clone());
@@ -776,8 +563,6 @@ fn launch_codex_blocking(app: AppHandle, profile_id: String) -> Result<CodexInst
         profile_name: data.profiles[profile_index].name.clone(),
         pid: child.id(),
         started_at: now,
-        skin_injector_pid,
-        skin_cdp_port,
     };
     codex_instances()
         .lock()
@@ -958,20 +743,6 @@ async fn list_codex_instances() -> Result<Vec<CodexInstance>, String> {
         .iter()
         .map(|instance| instance.pid)
         .collect::<Vec<_>>();
-    for instance in codex_instances()
-        .lock()
-        .map_err(|_| "实例状态锁已损坏。".to_string())?
-        .iter()
-        .filter(|instance| {
-            checked_pids.contains(&instance.pid) && !running_pids.contains(&instance.pid)
-        })
-    {
-        if let Some(injector_pid) = instance.skin_injector_pid {
-            let _ = hidden_command("taskkill.exe")
-                .args(taskkill_args(injector_pid))
-                .status();
-        }
-    }
     codex_instances()
         .lock()
         .map_err(|_| "实例状态锁已损坏。".to_string())?
@@ -993,19 +764,13 @@ fn filter_running_instances(
 
 #[tauri::command]
 fn stop_codex_instance(pid: u32) -> Result<(), String> {
-    let tracked = codex_instances()
+    let is_tracked = codex_instances()
         .lock()
         .map_err(|_| "实例状态锁已损坏。".to_string())?
         .iter()
-        .find(|instance| instance.pid == pid)
-        .cloned();
-    let Some(tracked) = tracked else {
+        .any(|instance| instance.pid == pid);
+    if !is_tracked {
         return Err("该 PID 不是本程序启动的 Codex 实例。".to_string());
-    };
-    if let Some(injector_pid) = tracked.skin_injector_pid {
-        let _ = hidden_command("taskkill.exe")
-            .args(taskkill_args(injector_pid))
-            .status();
     }
     let status = hidden_command("taskkill.exe")
         .args(taskkill_args(pid))
@@ -1108,7 +873,6 @@ fn new_profile(
         created_at: now.clone(),
         updated_at: now,
         last_used_at: None,
-        skin: ProfileSkinSettings::default(),
     })
 }
 
@@ -1181,15 +945,39 @@ fn link_agents_file(source: &Path, codex_home: &Path) -> Result<(), String> {
 fn get_shared_resources() -> Result<SharedResources, String> {
     let root = agents_root()?;
     let agents_path = root.join(SHARED_AGENTS_FILENAME);
-    let skills_path = root.join("skills");
+    let shared_skills_path = root.join("skills");
+    let codex_skills_path = default_codex_home()?.join("skills");
     let agents_content = if agents_path.is_file() {
         fs::read_to_string(&agents_path).map_err(format_io_error)?
     } else {
         String::new()
     };
     let mut skills = Vec::new();
+    collect_skills(&shared_skills_path, "~/.agents", true, &mut skills)?;
+    let mut legacy_skills = Vec::new();
+    collect_skills(&codex_skills_path, "~/.codex", false, &mut legacy_skills)?;
+    legacy_skills.retain(|legacy| !skills.iter().any(|skill| skill.name == legacy.name));
+    skills.extend(legacy_skills);
+    skills.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| b.shared.cmp(&a.shared)));
+    Ok(SharedResources {
+        agents_path: agents_path.to_string_lossy().to_string(),
+        agents_content,
+        skills_paths: vec![
+            shared_skills_path.to_string_lossy().to_string(),
+            codex_skills_path.to_string_lossy().to_string(),
+        ],
+        skills,
+    })
+}
+
+fn collect_skills(
+    skills_path: &Path,
+    source: &str,
+    shared: bool,
+    skills: &mut Vec<SkillInfo>,
+) -> Result<(), String> {
     if skills_path.is_dir() {
-        for entry in fs::read_dir(&skills_path).map_err(format_io_error)? {
+        for entry in fs::read_dir(skills_path).map_err(format_io_error)? {
             let entry = entry.map_err(format_io_error)?;
             let path = entry.path();
             let skill_file = path.join("SKILL.md");
@@ -1204,17 +992,60 @@ fn get_shared_resources() -> Result<SharedResources, String> {
             skills.push(SkillInfo {
                 name: entry.file_name().to_string_lossy().to_string(),
                 path: path.to_string_lossy().to_string(),
+                source: source.to_string(),
+                shared,
                 description,
             });
         }
     }
-    skills.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(SharedResources {
-        agents_path: agents_path.to_string_lossy().to_string(),
-        agents_content,
-        skills_path: skills_path.to_string_lossy().to_string(),
-        skills,
-    })
+    Ok(())
+}
+
+#[tauri::command]
+fn import_codex_skills() -> Result<SkillImportResult, String> {
+    let source_root = default_codex_home()?.join("skills");
+    let target_root = agents_root()?.join("skills");
+    import_skills(&source_root, &target_root)
+}
+
+fn import_skills(source_root: &Path, target_root: &Path) -> Result<SkillImportResult, String> {
+    fs::create_dir_all(target_root).map_err(format_io_error)?;
+
+    let mut result = SkillImportResult {
+        imported: 0,
+        skipped: 0,
+    };
+    if !source_root.is_dir() {
+        return Ok(result);
+    }
+
+    for entry in fs::read_dir(&source_root).map_err(format_io_error)? {
+        let entry = entry.map_err(format_io_error)?;
+        let source = entry.path();
+        if !source.is_dir() || !source.join("SKILL.md").is_file() {
+            continue;
+        }
+        let target = target_root.join(entry.file_name());
+        if target.exists() {
+            result.skipped += 1;
+            continue;
+        }
+        let temporary = target_root.join(format!(
+            ".{}.import-{}",
+            entry.file_name().to_string_lossy(),
+            Uuid::new_v4()
+        ));
+        if let Err(error) = copy_dir_recursive(&source, &temporary) {
+            let _ = fs::remove_dir_all(&temporary);
+            return Err(format_io_error(error));
+        }
+        if let Err(error) = fs::rename(&temporary, &target) {
+            let _ = fs::remove_dir_all(&temporary);
+            return Err(format_io_error(error));
+        }
+        result.imported += 1;
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1901,98 +1732,44 @@ fn format_io_error(error: io::Error) -> String {
 }
 
 #[cfg(test)]
-mod usage_scanner_tests {
-    use super::modules::usage_scanner;
-    use std::path::PathBuf;
-
-    fn userprofile() -> Option<PathBuf> {
-        std::env::var_os("USERPROFILE").map(PathBuf::from)
-    }
-
-    fn real_session_path() -> Option<PathBuf> {
-        let up = userprofile()?;
-        let p = up.join(r".codex\sessions\2026\07\07\rollout-2026-07-07T16-55-49-019f3bca-6d8b-7053-acab-5d7112efc164.jsonl");
-        if p.exists() {
-            Some(p)
-        } else {
-            None
-        }
-    }
-
-    #[test]
-    fn parses_real_session_file() {
-        let Some(path) = real_session_path() else {
-            eprintln!("[skip] real session file not found");
-            return;
-        };
-        let home_str = r"C:\Users\frank\.codex";
-
-        let result = usage_scanner::scan_session_file(
-            home_str,
-            &path,
-            "019f3bca-6d8b-7053-acab-5d7112efc164",
-            0,
-            &[(0, "test-profile".to_string())],
-        )
-        .expect("scan should succeed");
-
-        assert!(!result.new_records.is_empty(), "should have records");
-        let r = &result.new_records[0];
-        assert_eq!(r.session_id, "019f3bca-6d8b-7053-acab-5d7112efc164");
-        assert!(r.input_tokens > 0);
-        assert!(r.total_tokens > 0);
-        assert_eq!(r.plan_type.as_deref(), Some("free"));
-        assert!(r.primary_used_percent.is_some());
-    }
-
-    #[test]
-    fn incremental_scan_skips_already_read() {
-        let Some(path) = real_session_path() else {
-            return;
-        };
-        let home_str = r"C:\Users\frank\.codex";
-
-        let r1 = usage_scanner::scan_session_file(
-            home_str,
-            &path,
-            "test",
-            0,
-            &[(0, "test-profile".to_string())],
-        )
-        .expect("first scan ok");
-        let offset = r1.new_offset;
-        assert!(offset > 0);
-
-        let r2 = usage_scanner::scan_session_file(
-            home_str,
-            &path,
-            "test",
-            offset,
-            &[(0, "test-profile".to_string())],
-        )
-        .expect("second scan ok");
-        assert_eq!(r2.new_records.len(), 0);
-        assert_eq!(r2.new_offset, offset);
-    }
-
-    #[test]
-    fn walks_session_files() {
-        let Some(up) = userprofile() else { return };
-        let home = up.join(".codex");
-        let files = usage_scanner::walk_session_files(&home).expect("walk ok");
-        if files.is_empty() {
-            eprintln!("[skip] no session files in current default Codex Home");
-            return;
-        }
-        assert!(files
-            .iter()
-            .all(|path| path.extension().is_some_and(|ext| ext == "jsonl")));
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imports_codex_skills_without_overwriting_shared_skills() {
+        let root = env::temp_dir().join(format!("codex-skills-import-test-{}", Uuid::new_v4()));
+        let source = root.join("codex-skills");
+        let target = root.join("shared-skills");
+        fs::create_dir_all(source.join("new-skill")).unwrap();
+        fs::write(
+            source.join("new-skill").join("SKILL.md"),
+            "description: new",
+        )
+        .unwrap();
+        fs::create_dir_all(source.join("existing-skill")).unwrap();
+        fs::write(
+            source.join("existing-skill").join("SKILL.md"),
+            "description: source",
+        )
+        .unwrap();
+        fs::create_dir_all(target.join("existing-skill")).unwrap();
+        fs::write(
+            target.join("existing-skill").join("SKILL.md"),
+            "description: shared",
+        )
+        .unwrap();
+
+        let result = import_skills(&source, &target).unwrap();
+
+        assert_eq!(result.imported, 1);
+        assert_eq!(result.skipped, 1);
+        assert!(target.join("new-skill").join("SKILL.md").is_file());
+        assert_eq!(
+            fs::read_to_string(target.join("existing-skill").join("SKILL.md")).unwrap(),
+            "description: shared"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn account_profile(home_path: &Path) -> Profile {
         Profile {
@@ -2013,7 +1790,6 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
             last_used_at: None,
-            skin: ProfileSkinSettings::default(),
         }
     }
 
@@ -2082,16 +1858,12 @@ mod tests {
                 profile_name: "one".to_string(),
                 pid: 11,
                 started_at: String::new(),
-                skin_injector_pid: None,
-                skin_cdp_port: None,
             },
             CodexInstance {
                 profile_id: "two".to_string(),
                 profile_name: "two".to_string(),
                 pid: 22,
                 started_at: String::new(),
-                skin_injector_pid: None,
-                skin_cdp_port: None,
             },
         ];
         let mut checked = Vec::new();
@@ -2250,130 +2022,6 @@ mod tests {
     }
 }
 
-// region: usage commands
-use crate::models::usage::UsageGranularity;
-use crate::modules::usage_db::{self as usage_db_mod, UsageDb};
-use crate::modules::usage_scanner as usage_scanner_mod;
-
-fn open_usage_db(app: &AppHandle) -> Result<UsageDb, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("无法获取应用数据目录: {}", e))?;
-    let db_path = dir.join("usage.db");
-    UsageDb::open(&db_path)
-}
-
-fn build_usage_profile_map(data: &StoredData) -> Vec<(String, String, String)> {
-    data.profiles
-        .iter()
-        .map(|p| (p.home_path.clone(), p.id.clone(), p.name.clone()))
-        .collect()
-}
-
-#[tauri::command]
-fn scan_usage(app: AppHandle) -> Result<crate::models::usage::UsageSummary, String> {
-    let data = load_data(&app)?;
-    let profiles = build_usage_profile_map(&data);
-    let mut homes: Vec<String> = profiles.iter().map(|(h, _, _)| h.clone()).collect();
-    homes.sort();
-    homes.dedup();
-
-    let mut db = open_usage_db(&app)?;
-    let mut total_new = 0usize;
-    let mut errors: Vec<String> = Vec::new();
-
-    for home in &homes {
-        let path = std::path::Path::new(home);
-        let session_files = match usage_scanner_mod::walk_session_files(path) {
-            Ok(v) => v,
-            Err(e) => {
-                errors.push(format!("{}: {}", home, e));
-                continue;
-            }
-        };
-        for sf in session_files {
-            let hint = sf
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .and_then(|s| s.split("rollout-").nth(1))
-                .unwrap_or("unknown")
-                .to_string();
-            let start_offset = db.get_scan_offset(home, &hint).unwrap_or(0) as u64;
-            let profile_launches = db.list_profile_launches(home)?;
-            match usage_scanner_mod::scan_session_file(
-                home,
-                &sf,
-                &hint,
-                start_offset,
-                &profile_launches,
-            ) {
-                Ok(result) => {
-                    let inserted = db.insert_records(&result.new_records)?;
-                    total_new += inserted;
-                    db.update_scan_offset(home, &hint, result.new_offset as i64)?;
-                }
-                Err(e) => {
-                    errors.push(format!("{}: {}", sf.display(), e));
-                }
-            }
-        }
-    }
-
-    let profile_map = usage_db_mod::build_profile_map(&profiles);
-    let summary = db.compute_summary(&profile_map)?;
-    if !errors.is_empty() {
-        eprintln!("[usage] scan warnings: {}", errors.join("; "));
-    }
-    if total_new > 0 {
-        eprintln!("[usage] inserted {} new records", total_new);
-    }
-    Ok(summary)
-}
-
-#[tauri::command]
-fn get_usage_summary(app: AppHandle) -> Result<crate::models::usage::UsageSummary, String> {
-    let data = load_data(&app)?;
-    let profiles = build_usage_profile_map(&data);
-    let db = open_usage_db(&app)?;
-    let profile_map = usage_db_mod::build_profile_map(&profiles);
-    db.compute_summary(&profile_map)
-}
-
-#[tauri::command]
-fn get_usage_buckets(
-    app: AppHandle,
-    granularity: UsageGranularity,
-    since: Option<i64>,
-    until: Option<i64>,
-    profile_id: Option<String>,
-) -> Result<Vec<crate::models::usage::UsageBucket>, String> {
-    let profile_filter = profile_id.as_deref();
-    let db = open_usage_db(&app)?;
-    db.compute_buckets(granularity, since, until, profile_filter)
-}
-
-#[tauri::command]
-fn get_usage_sessions(
-    app: AppHandle,
-    profile_id: Option<String>,
-    limit: Option<i64>,
-) -> Result<Vec<crate::models::usage::SessionInfo>, String> {
-    let data = load_data(&app)?;
-    let profiles = build_usage_profile_map(&data);
-    let profile_map = usage_db_mod::build_profile_map(&profiles);
-    let profile_filter = profile_id.as_deref();
-    let db = open_usage_db(&app)?;
-    db.list_sessions(&profile_map, profile_filter, limit.unwrap_or(20))
-}
-
-#[tauri::command]
-fn clear_usage_data(app: AppHandle, before: i64) -> Result<usize, String> {
-    let mut db = open_usage_db(&app)?;
-    db.clear_before(before)
-}
-// endregion: usage commands
-
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -2418,14 +2066,8 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_app_state,
-            scan_usage,
-            get_usage_summary,
-            get_usage_buckets,
-            get_usage_sessions,
-            clear_usage_data,
             create_profile,
             update_profile,
-            update_profile_skin,
             delete_profile,
             detect_codex_app_id,
             launch_default_codex,
@@ -2442,6 +2084,7 @@ fn main() {
             is_codex_process_running,
             get_shared_resources,
             save_shared_agents,
+            import_codex_skills,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
