@@ -124,4 +124,4 @@ npm run tauri:build
 
 发布前必须更新 `CHANGELOG.md`、`README.md` 和 `README.zh-CN.md`。
 
-当前版本：`0.2.8`。
+当前公开版本：`0.2.7`。`0.2.8` 正在开发中。
