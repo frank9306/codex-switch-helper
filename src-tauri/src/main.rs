@@ -7,6 +7,7 @@ use std::os::windows::fs::symlink_file;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::{
+    collections::BTreeMap,
     env,
     ffi::OsString,
     fs, io,
@@ -38,6 +39,13 @@ const CODEX_PROCESS_NAME: &str = "Codex.exe";
 const CODEX_CONFIG_FILENAME: &str = "config.toml";
 const FILE_AUTH_CREDENTIALS_SETTING: &str = "cli_auth_credentials_store = \"file\"";
 const SHARED_AGENTS_FILENAME: &str = "AGENTS.md";
+const SHARED_PLUGIN_MARKETPLACE: &str = "agents-shared";
+const OFFICIAL_PLUGIN_MARKETPLACES: [&str; 4] = [
+    "openai-bundled",
+    "openai-curated",
+    "openai-curated-remote",
+    "openai-primary-runtime",
+];
 const ENVIRONMENT_BROADCAST_TIMEOUT_MS: u32 = 500;
 const DETECT_CODEX_EXECUTABLE_SCRIPT: &str = r#"
 $packages = Get-AppxPackage | Where-Object { $_.Name -like 'OpenAI.Codex*' -or $_.PackageFamilyName -like 'OpenAI.Codex_*' }
@@ -180,6 +188,39 @@ struct SharedResources {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct SharedPluginInfo {
+    name: String,
+    version: String,
+    path: String,
+    synced_profiles: usize,
+    total_profiles: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SharedPlugins {
+    marketplace_path: String,
+    plugins: Vec<SharedPluginInfo>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginSyncResult {
+    imported: usize,
+    updated: usize,
+    skipped: usize,
+    conflicts: Vec<String>,
+    profile_errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PluginManifest {
+    name: String,
+    version: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SkillImportResult {
     imported: usize,
     skipped: usize,
@@ -296,6 +337,7 @@ fn create_profile(
         )
         .map_err(format_io_error)?;
     }
+    sync_shared_plugins_to_profile(Path::new(&profile.home_path))?;
     data.profiles.push(profile.clone());
     if data.active_profile_id.is_none() {
         data.active_profile_id = Some(profile.id.clone());
@@ -533,6 +575,7 @@ fn launch_codex_blocking(app: AppHandle, profile_id: String) -> Result<CodexInst
     }
     apply_profile_auth_files_to_home(&data.profiles[profile_index], &home_path, false)?;
     ensure_shared_agents_link(&home_path)?;
+    sync_shared_plugins_to_profile(&home_path)?;
     if let Some(config_toml) = migrate_home_config_paths(
         &app,
         &PathBuf::from(&data.profiles[profile_index].home_path),
@@ -1044,6 +1087,408 @@ fn import_skills(source_root: &Path, target_root: &Path) -> Result<SkillImportRe
             return Err(format_io_error(error));
         }
         result.imported += 1;
+    }
+    Ok(result)
+}
+
+fn shared_plugins_root() -> Result<PathBuf, String> {
+    Ok(agents_root()?.join("plugins"))
+}
+
+fn plugin_manifest(plugin_root: &Path) -> Result<PluginManifest, String> {
+    let path = plugin_root.join(".codex-plugin").join("plugin.json");
+    let content = fs::read_to_string(&path).map_err(format_io_error)?;
+    serde_json::from_str(&content)
+        .map_err(|error| format!("插件清单解析失败（{}）：{error}", path.display()))
+}
+
+fn semantic_version_key(version: &str) -> (Vec<u64>, String) {
+    let core = version
+        .trim_start_matches('v')
+        .split(['-', '+'])
+        .next()
+        .unwrap_or(version);
+    let parts = core
+        .split('.')
+        .map(|part| part.parse::<u64>().unwrap_or(0))
+        .collect();
+    (parts, version.to_string())
+}
+
+fn directories_equal(left: &Path, right: &Path) -> io::Result<bool> {
+    let mut left_entries = fs::read_dir(left)?
+        .map(|entry| entry.map(|value| value.file_name()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut right_entries = fs::read_dir(right)?
+        .map(|entry| entry.map(|value| value.file_name()))
+        .collect::<Result<Vec<_>, _>>()?;
+    left_entries.sort();
+    right_entries.sort();
+    if left_entries != right_entries {
+        return Ok(false);
+    }
+    for name in left_entries {
+        let left_path = left.join(&name);
+        let right_path = right.join(&name);
+        let left_metadata = fs::metadata(&left_path)?;
+        let right_metadata = fs::metadata(&right_path)?;
+        if left_metadata.is_dir() != right_metadata.is_dir() {
+            return Ok(false);
+        }
+        if left_metadata.is_dir() {
+            if !directories_equal(&left_path, &right_path)? {
+                return Ok(false);
+            }
+        } else if fs::read(&left_path)? != fs::read(&right_path)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn collect_shared_plugins() -> Result<Vec<(PluginManifest, PathBuf)>, String> {
+    let root = shared_plugins_root()?;
+    let mut selected = BTreeMap::<String, (PluginManifest, PathBuf)>::new();
+    if !root.is_dir() {
+        return Ok(Vec::new());
+    }
+    for plugin_entry in fs::read_dir(&root).map_err(format_io_error)? {
+        let plugin_entry = plugin_entry.map_err(format_io_error)?;
+        if !plugin_entry.path().is_dir() {
+            continue;
+        }
+        for version_entry in fs::read_dir(plugin_entry.path()).map_err(format_io_error)? {
+            let version_entry = version_entry.map_err(format_io_error)?;
+            if !version_entry.path().is_dir() {
+                continue;
+            }
+            let manifest = match plugin_manifest(&version_entry.path()) {
+                Ok(manifest) => manifest,
+                Err(_) => continue,
+            };
+            let replace = selected
+                .get(&manifest.name)
+                .map(|(current, _)| {
+                    semantic_version_key(&manifest.version) > semantic_version_key(&current.version)
+                })
+                .unwrap_or(true);
+            if replace {
+                selected.insert(manifest.name.clone(), (manifest, version_entry.path()));
+            }
+        }
+    }
+    Ok(selected.into_values().collect())
+}
+
+fn write_shared_marketplace(plugins: &[(PluginManifest, PathBuf)]) -> Result<(), String> {
+    let root = shared_plugins_root()?;
+    fs::create_dir_all(&root).map_err(format_io_error)?;
+    let path = root.join("marketplace.json");
+    let mut document = if path.is_file() {
+        let content = fs::read_to_string(&path).map_err(format_io_error)?;
+        serde_json::from_str::<serde_json::Value>(&content)
+            .map_err(|error| format!("Marketplace 解析失败（{}）：{error}", path.display()))?
+    } else {
+        serde_json::json!({})
+    };
+    let object = document
+        .as_object_mut()
+        .ok_or_else(|| "Marketplace 根节点必须是 JSON 对象。".to_string())?;
+    object.insert(
+        "name".to_string(),
+        serde_json::Value::String(SHARED_PLUGIN_MARKETPLACE.to_string()),
+    );
+    object
+        .entry("interface")
+        .or_insert_with(|| serde_json::json!({ "displayName": "Shared Plugins" }));
+    let mut entries = object
+        .get("plugins")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    entries.retain(|entry| {
+        entry
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(|name| !plugins.iter().any(|(manifest, _)| manifest.name == name))
+            .unwrap_or(true)
+    });
+    for (manifest, _) in plugins {
+        entries.push(serde_json::json!({
+            "name": manifest.name,
+            "source": {
+                "source": "local",
+                "path": format!("./{}/{}", manifest.name, manifest.version)
+            },
+            "policy": {
+                "installation": "AVAILABLE",
+                "authentication": "ON_INSTALL"
+            },
+            "category": "Productivity"
+        }));
+    }
+    object.insert("plugins".to_string(), serde_json::Value::Array(entries));
+    let content = serde_json::to_string_pretty(&document)
+        .map_err(|error| format!("Marketplace 序列化失败：{error}"))?;
+    fs::write(path, format!("{content}\n")).map_err(format_io_error)
+}
+
+fn upsert_toml_section(content: &str, header: &str, body: &[String]) -> String {
+    let lines = content.lines().collect::<Vec<_>>();
+    let start = lines.iter().position(|line| line.trim() == header);
+    let mut output = Vec::<String>::new();
+    if let Some(start) = start {
+        let end = lines
+            .iter()
+            .enumerate()
+            .skip(start + 1)
+            .find(|(_, line)| line.trim_start().starts_with('['))
+            .map(|(index, _)| index)
+            .unwrap_or(lines.len());
+        output.extend(lines[..start].iter().map(|line| (*line).to_string()));
+        output.push(header.to_string());
+        output.extend(body.iter().cloned());
+        output.extend(lines[end..].iter().map(|line| (*line).to_string()));
+    } else {
+        output.extend(lines.iter().map(|line| (*line).to_string()));
+        if !output.is_empty() && output.last().is_some_and(|line| !line.is_empty()) {
+            output.push(String::new());
+        }
+        output.push(header.to_string());
+        output.extend(body.iter().cloned());
+    }
+    format!("{}\n", output.join("\n"))
+}
+
+fn disable_old_plugin_entries(content: &str, plugin_name: &str) -> String {
+    let shared_header = format!("[plugins.\"{plugin_name}@{SHARED_PLUGIN_MARKETPLACE}\"]");
+    let prefix = format!("[plugins.\"{plugin_name}@");
+    let mut in_old_section = false;
+    let lines = content
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') {
+                in_old_section = trimmed.starts_with(&prefix) && trimmed != shared_header;
+            }
+            if in_old_section && trimmed.starts_with("enabled") {
+                "enabled = false".to_string()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>();
+    format!("{}\n", lines.join("\n"))
+}
+
+fn sync_shared_plugins_to_profile(home: &Path) -> Result<(usize, usize), String> {
+    let plugins = collect_shared_plugins()?;
+    if plugins.is_empty() {
+        return Ok((0, 0));
+    }
+    write_shared_marketplace(&plugins)?;
+    let cache_root = home
+        .join("plugins")
+        .join("cache")
+        .join(SHARED_PLUGIN_MARKETPLACE);
+    let mut copied = 0;
+    let mut skipped = 0;
+    for (manifest, source) in &plugins {
+        let target = cache_root.join(&manifest.name).join(&manifest.version);
+        if target.is_dir() && directories_equal(source, &target).map_err(format_io_error)? {
+            skipped += 1;
+        } else {
+            let temporary = cache_root.join(&manifest.name).join(format!(
+                ".{}.sync-{}",
+                manifest.version,
+                Uuid::new_v4()
+            ));
+            if temporary.exists() {
+                fs::remove_dir_all(&temporary).map_err(format_io_error)?;
+            }
+            copy_dir_recursive(source, &temporary).map_err(format_io_error)?;
+            if target.exists() {
+                fs::remove_dir_all(&target).map_err(format_io_error)?;
+            }
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(format_io_error)?;
+            }
+            fs::rename(&temporary, &target).map_err(format_io_error)?;
+            copied += 1;
+        }
+    }
+    let config_path = home.join(CODEX_CONFIG_FILENAME);
+    let mut config = if config_path.is_file() {
+        fs::read_to_string(&config_path).map_err(format_io_error)?
+    } else {
+        String::new()
+    };
+    let marketplace_root = shared_plugins_root()?
+        .to_string_lossy()
+        .replace('\\', "\\\\");
+    config = upsert_toml_section(
+        &config,
+        &format!("[marketplaces.{SHARED_PLUGIN_MARKETPLACE}]"),
+        &[
+            "source_type = \"local\"".to_string(),
+            format!("source = \"{marketplace_root}\""),
+        ],
+    );
+    for (manifest, _) in &plugins {
+        config = disable_old_plugin_entries(&config, &manifest.name);
+        config = upsert_toml_section(
+            &config,
+            &format!(
+                "[plugins.\"{}@{}\"]",
+                manifest.name, SHARED_PLUGIN_MARKETPLACE
+            ),
+            &["enabled = true".to_string()],
+        );
+    }
+    fs::write(config_path, config).map_err(format_io_error)?;
+    Ok((copied, skipped))
+}
+
+#[tauri::command]
+fn get_shared_plugins(app: AppHandle) -> Result<SharedPlugins, String> {
+    let data = load_data(&app)?;
+    let profiles = data
+        .profiles
+        .iter()
+        .filter(|profile| profile.managed)
+        .collect::<Vec<_>>();
+    let plugins = collect_shared_plugins()?
+        .into_iter()
+        .map(|(manifest, path)| {
+            let synced_profiles = profiles
+                .iter()
+                .filter(|profile| {
+                    Path::new(&profile.home_path)
+                        .join("plugins")
+                        .join("cache")
+                        .join(SHARED_PLUGIN_MARKETPLACE)
+                        .join(&manifest.name)
+                        .join(&manifest.version)
+                        .is_dir()
+                })
+                .count();
+            SharedPluginInfo {
+                name: manifest.name,
+                version: manifest.version,
+                path: path.to_string_lossy().to_string(),
+                synced_profiles,
+                total_profiles: profiles.len(),
+            }
+        })
+        .collect();
+    Ok(SharedPlugins {
+        marketplace_path: shared_plugins_root()?
+            .join("marketplace.json")
+            .to_string_lossy()
+            .to_string(),
+        plugins,
+    })
+}
+
+#[tauri::command]
+fn import_profile_plugins(app: AppHandle) -> Result<PluginSyncResult, String> {
+    let data = load_data(&app)?;
+    let shared_root = shared_plugins_root()?;
+    fs::create_dir_all(&shared_root).map_err(format_io_error)?;
+    let mut result = PluginSyncResult::default();
+    for profile in data.profiles.iter().filter(|profile| profile.managed) {
+        let cache_root = Path::new(&profile.home_path).join("plugins").join("cache");
+        if !cache_root.is_dir() {
+            continue;
+        }
+        for marketplace_entry in fs::read_dir(&cache_root).map_err(format_io_error)? {
+            let marketplace_entry = marketplace_entry.map_err(format_io_error)?;
+            let marketplace = marketplace_entry.file_name().to_string_lossy().to_string();
+            if OFFICIAL_PLUGIN_MARKETPLACES.contains(&marketplace.as_str())
+                || marketplace == SHARED_PLUGIN_MARKETPLACE
+                || !marketplace_entry.path().is_dir()
+            {
+                continue;
+            }
+            for plugin_entry in fs::read_dir(marketplace_entry.path()).map_err(format_io_error)? {
+                let plugin_entry = plugin_entry.map_err(format_io_error)?;
+                if !plugin_entry.path().is_dir() {
+                    continue;
+                }
+                for version_entry in fs::read_dir(plugin_entry.path()).map_err(format_io_error)? {
+                    let version_entry = version_entry.map_err(format_io_error)?;
+                    if !version_entry.path().is_dir() {
+                        continue;
+                    }
+                    let manifest = match plugin_manifest(&version_entry.path()) {
+                        Ok(manifest) => manifest,
+                        Err(_) => {
+                            result.skipped += 1;
+                            continue;
+                        }
+                    };
+                    let target = shared_root.join(&manifest.name).join(&manifest.version);
+                    if target.is_dir() {
+                        if directories_equal(&version_entry.path(), &target)
+                            .map_err(format_io_error)?
+                        {
+                            result.skipped += 1;
+                        } else {
+                            result.conflicts.push(format!(
+                                "{} {}（来源 Profile：{}）",
+                                manifest.name, manifest.version, profile.name
+                            ));
+                        }
+                        continue;
+                    }
+                    let temporary = shared_root.join(&manifest.name).join(format!(
+                        ".{}.import-{}",
+                        manifest.version,
+                        Uuid::new_v4()
+                    ));
+                    copy_dir_recursive(&version_entry.path(), &temporary)
+                        .map_err(format_io_error)?;
+                    if let Some(parent) = target.parent() {
+                        fs::create_dir_all(parent).map_err(format_io_error)?;
+                    }
+                    fs::rename(temporary, target).map_err(format_io_error)?;
+                    result.imported += 1;
+                }
+            }
+        }
+    }
+    let plugins = collect_shared_plugins()?;
+    write_shared_marketplace(&plugins)?;
+    for profile in data.profiles.iter().filter(|profile| profile.managed) {
+        match sync_shared_plugins_to_profile(Path::new(&profile.home_path)) {
+            Ok((updated, skipped)) => {
+                result.updated += updated;
+                result.skipped += skipped;
+            }
+            Err(error) => result
+                .profile_errors
+                .push(format!("{}：{error}", profile.name)),
+        }
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+fn sync_shared_plugins(app: AppHandle) -> Result<PluginSyncResult, String> {
+    let data = load_data(&app)?;
+    let plugins = collect_shared_plugins()?;
+    write_shared_marketplace(&plugins)?;
+    let mut result = PluginSyncResult::default();
+    for profile in data.profiles.iter().filter(|profile| profile.managed) {
+        match sync_shared_plugins_to_profile(Path::new(&profile.home_path)) {
+            Ok((updated, skipped)) => {
+                result.updated += updated;
+                result.skipped += skipped;
+            }
+            Err(error) => result
+                .profile_errors
+                .push(format!("{}：{error}", profile.name)),
+        }
     }
     Ok(result)
 }
@@ -1771,6 +2216,84 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn semantic_versions_choose_numeric_order() {
+        assert!(
+            semantic_version_key("v0.0.10") > semantic_version_key("0.0.2"),
+            "semantic versions must not use lexical ordering"
+        );
+        assert!(semantic_version_key("1.2.0") > semantic_version_key("1.1.99"));
+    }
+
+    #[test]
+    fn toml_section_update_preserves_unrelated_content() {
+        let config = "model = \"gpt-test\"\n\n[features]\njs_repl = false\n";
+        let updated = upsert_toml_section(
+            config,
+            "[marketplaces.agents-shared]",
+            &[
+                "source_type = \"local\"".to_string(),
+                "source = \"C:\\\\Users\\\\tester\\\\.agents\\\\plugins\"".to_string(),
+            ],
+        );
+        assert!(updated.contains("model = \"gpt-test\""));
+        assert!(updated.contains("[features]\njs_repl = false"));
+        assert_eq!(updated.matches("[marketplaces.agents-shared]").count(), 1);
+
+        let updated_again = upsert_toml_section(
+            &updated,
+            "[marketplaces.agents-shared]",
+            &[
+                "source_type = \"local\"".to_string(),
+                "source = \"D:\\\\shared\"".to_string(),
+            ],
+        );
+        assert_eq!(
+            updated_again
+                .matches("[marketplaces.agents-shared]")
+                .count(),
+            1
+        );
+        assert!(updated_again.contains("source = \"D:\\\\shared\""));
+    }
+
+    #[test]
+    fn old_plugin_entries_are_disabled_without_touching_shared_or_official_plugins() {
+        let config = r#"[plugins."browser-automation@browser-automation"]
+enabled = true
+
+[plugins."browser-automation@agents-shared"]
+enabled = true
+
+[plugins."chrome@openai-bundled"]
+enabled = true
+"#;
+        let updated = disable_old_plugin_entries(config, "browser-automation");
+        assert!(updated
+            .contains("[plugins.\"browser-automation@browser-automation\"]\nenabled = false"));
+        assert!(updated.contains("[plugins.\"browser-automation@agents-shared\"]\nenabled = true"));
+        assert!(updated.contains("[plugins.\"chrome@openai-bundled\"]\nenabled = true"));
+    }
+
+    #[test]
+    fn directory_comparison_detects_matching_and_conflicting_plugins() {
+        let root = env::temp_dir().join(format!("codex-plugin-compare-{}", Uuid::new_v4()));
+        let left = root.join("left");
+        let right = root.join("right");
+        fs::create_dir_all(left.join(".codex-plugin")).unwrap();
+        fs::create_dir_all(right.join(".codex-plugin")).unwrap();
+        fs::write(left.join(".codex-plugin/plugin.json"), "{}").unwrap();
+        fs::write(right.join(".codex-plugin/plugin.json"), "{}").unwrap();
+        assert!(directories_equal(&left, &right).unwrap());
+        fs::write(
+            right.join(".codex-plugin/plugin.json"),
+            "{\"changed\":true}",
+        )
+        .unwrap();
+        assert!(!directories_equal(&left, &right).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn account_profile(home_path: &Path) -> Profile {
         Profile {
             id: "test-profile".to_string(),
@@ -2083,8 +2606,11 @@ fn main() {
             save_settings,
             is_codex_process_running,
             get_shared_resources,
+            get_shared_plugins,
             save_shared_agents,
             import_codex_skills,
+            import_profile_plugins,
+            sync_shared_plugins,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

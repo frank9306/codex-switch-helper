@@ -6,7 +6,7 @@ Tauri desktop helper for switching Codex App profiles on Windows.
 
 ## Screenshot
 
-![Codex Switch Helper screenshot](docs/screenshot.png)
+![Codex Switch Helper screenshot](docs/promo/dashboard-watermarked.png)
 
 ## What It Does
 
@@ -15,6 +15,7 @@ Tauri desktop helper for switching Codex App profiles on Windows.
 - Supports account-login Profiles and API-key Profiles.
 - Edits and refreshes one global `~/.agents/AGENTS.md`, linked into every managed Profile Home.
 - Discovers Skills in both `~/.agents/skills` and `~/.codex/skills`, with a non-overwriting import into the shared directory.
+- Collects third-party Plugins from managed Profiles into `~/.agents/plugins` and synchronizes them to every managed Profile through a local `agents-shared` Marketplace.
 - Supports HTTP and SOCKS5 proxy settings for the helper app and Codex launches.
 - Runs multiple isolated Codex instances in parallel.
 - Keeps the helper responsive during active Codex tasks by performing Profile inspection, launch preparation, and process checks outside the UI event thread.
@@ -39,6 +40,15 @@ Tauri desktop helper for switching Codex App profiles on Windows.
 - Creating an account Profile does not require editing `config.toml` or locating `auth.json`. Launch it and complete sign-in inside Codex.
 - Managed account Homes automatically use file-based credential storage so each Profile keeps an isolated login.
 - API keys and saved auth/config data are currently stored in local JSON without encryption.
+
+## Shared AGENTS.md, Skills, And Plugins
+
+- The global `~/.agents/AGENTS.md` is linked into every managed Profile Home and can be viewed, edited, and refreshed in the app.
+- The Skills view discovers both `~/.agents/skills` and `~/.codex/skills`; imports add only missing entries and never overwrite an existing shared Skill.
+- The Plugins view can collect third-party plugins from all managed Profiles and synchronize the shared versions back to every managed Profile.
+- Shared plugins live under `~/.agents/plugins/<plugin>/<version>`, with the local Marketplace manifest at `~/.agents/plugins/marketplace.json`.
+- Plugins from OpenAI bundled or official Marketplaces are excluded from the shared library.
+- Same-name, same-version plugins with different contents are reported as conflicts instead of being overwritten silently.
 
 ## Default Launch
 
@@ -114,4 +124,4 @@ npm run tauri:build
 
 Also update `CHANGELOG.md`, `README.md`, and `README.zh-CN.md` before tagging a release.
 
-Current release: `0.2.6`.
+Current release: `0.2.8`.

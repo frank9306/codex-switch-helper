@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.8 - 2026-07-23
+
+- Added a shared third-party plugin library under `~/.agents/plugins`, with import from managed Profiles and synchronization back to every managed Profile.
+- Added a generated local `agents-shared` marketplace and Profile configuration updates so shared plugins remain available without mixing official plugin caches into the library.
+- Replaced the page-level status message with compact success, information, error, and loading toasts that preserve detailed failure output.
+- Added a Chinese promotional article and new watermarked product screenshots covering Profile management, Skills, and in-app update status.
+
 ## 0.2.7 - 2026-07-22
 
 - Split shared prompts and Skills into separate views, with search, source grouping, clearer rows, and an explicit refresh action.

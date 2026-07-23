@@ -6,7 +6,7 @@
 
 ## 产品截图
 
-![Codex Switch Helper 产品截图](docs/screenshot.png)
+![Codex Switch Helper 产品截图](docs/promo/dashboard-watermarked.png)
 
 ## 功能
 
@@ -15,6 +15,7 @@
 - 支持账号登录 Profile 和 API Key 登录 Profile。
 - 查看、编辑并刷新全局 `~/.agents/AGENTS.md`；该文件会链接到所有托管 Profile Home。
 - 同时发现 `~/.agents/skills` 与 `~/.codex/skills`，并可将后者中缺失的 Skills 非覆盖式导入共享目录。
+- 将托管 Profile 中的第三方 Plugins 汇总到 `~/.agents/plugins`，并通过本地 `agents-shared` Marketplace 同步到所有托管 Profile。
 - 支持为本工具和 Codex 启动配置 HTTP / SOCKS5 代理。
 - 支持同时启动和停止多个独立 Codex 实例。
 - Profile 检查、启动准备和进程状态查询不会占用 UI 事件线程，Codex 运行任务时切换工具仍可保持响应。
@@ -39,6 +40,15 @@
 - 新建账号 Profile 不需要手动修改 `config.toml` 或寻找 `auth.json`；创建后启动 Codex 并在其中完成登录即可。
 - 托管账号 Home 会自动使用文件凭据存储，确保每个 Profile 的登录状态相互隔离。
 - API Key 以及保存的 auth/config 数据当前明文存储在本地 JSON 中，暂未加密。
+
+## 共享 AGENTS.md、Skills 和 Plugins
+
+- 全局 `~/.agents/AGENTS.md` 会链接到每个托管 Profile Home，应用内可以查看、编辑和刷新。
+- Skills 页面同时发现 `~/.agents/skills` 与 `~/.codex/skills`；导入只补充缺失内容，不覆盖同名共享 Skill。
+- Plugins 页面可以从所有托管 Profile 汇总第三方插件，并把共享版本同步回全部托管 Profile。
+- 共享插件保存在 `~/.agents/plugins/<plugin>/<version>`，本地 Marketplace 清单位于 `~/.agents/plugins/marketplace.json`。
+- OpenAI 内置或官方 Marketplace 的插件缓存不会被汇总到共享目录。
+- 同名同版本但内容不同的插件会报告冲突，不会静默覆盖。
 
 ## 默认启动
 
@@ -114,4 +124,4 @@ npm run tauri:build
 
 发布前必须更新 `CHANGELOG.md`、`README.md` 和 `README.zh-CN.md`。
 
-当前版本：`0.2.6`。
+当前版本：`0.2.8`。

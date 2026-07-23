@@ -14,6 +14,15 @@ type ActiveMenu = 'profiles' | 'resources' | 'settings' | 'about'
 type ProxyProtocol = 'http' | 'socks5'
 type Theme = 'light' | 'dark'
 type ConfirmIntent = 'danger' | 'warning'
+type NoticeTone = 'success' | 'info' | 'error'
+
+type Notice = {
+  id: number
+  tone: NoticeTone
+  title: string
+  detail?: string
+  duration?: number
+}
 
 type ConfirmRequest = {
   title: string
@@ -125,11 +134,51 @@ type SkillImportResult = {
   skipped: number
 }
 
+type SharedPlugins = {
+  marketplacePath: string
+  plugins: Array<{
+    name: string
+    version: string
+    path: string
+    syncedProfiles: number
+    totalProfiles: number
+  }>
+}
+
+type PluginSyncResult = {
+  imported: number
+  updated: number
+  skipped: number
+  conflicts: string[]
+  profileErrors: string[]
+}
+
 type CodexInstance = {
   profileId: string
   profileName: string
   pid: number
   startedAt: string
+}
+
+function NoticeToast({ notice, onDismiss }: { notice: Notice; onDismiss: (id: number) => void }) {
+  useEffect(() => {
+    if (!notice.duration) return
+    const timer = window.setTimeout(() => onDismiss(notice.id), notice.duration)
+    return () => window.clearTimeout(timer)
+  }, [notice.id, notice.duration])
+
+  const icon = notice.tone === 'success' ? '✓' : notice.tone === 'error' ? '!' : 'i'
+
+  return (
+    <div className={`notice-toast ${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'}>
+      <span className="notice-icon" aria-hidden="true">{icon}</span>
+      <div className="notice-copy">
+        <strong>{notice.title}</strong>
+        {notice.detail && <p>{notice.detail}</p>}
+      </div>
+      <button className="notice-close" type="button" aria-label="关闭通知" onClick={() => onDismiss(notice.id)}>×</button>
+    </div>
+  )
 }
 
 function App() {
@@ -153,7 +202,7 @@ function App() {
   const [launchAtStartup, setLaunchAtStartup] = useState(false)
   const [theme, setTheme] = useState<Theme>('light')
   const [detectedCodexAppId, setDetectedCodexAppId] = useState<string | null>(null)
-  const [message, setMessage] = useState('')
+  const [notices, setNotices] = useState<Notice[]>([])
   const [busy, setBusy] = useState(false)
   const [appVersion, setAppVersion] = useState('')
   const [updateBusy, setUpdateBusy] = useState(false)
@@ -161,11 +210,32 @@ function App() {
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
   const [loadingLabel, setLoadingLabel] = useState('')
   const [resources, setResources] = useState<SharedResources | null>(null)
+  const [sharedPlugins, setSharedPlugins] = useState<SharedPlugins | null>(null)
   const [agentsDraft, setAgentsDraft] = useState('')
   const [instances, setInstances] = useState<CodexInstance[]>([])
   const [profileInspection, setProfileInspection] = useState<ProfileInspection | null>(null)
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null)
   const codexAppIdDetectionStarted = useRef(false)
+  const noticeId = useRef(0)
+
+  function dismissNotice(id: number) {
+    setNotices((current) => current.filter((notice) => notice.id !== id))
+  }
+
+  function showNotice(title: string, tone: NoticeTone = 'success', detail?: string) {
+    const notice: Notice = {
+      id: ++noticeId.current,
+      tone,
+      title,
+      detail,
+      duration: tone === 'error' ? undefined : tone === 'info' ? 4000 : 3000,
+    }
+    setNotices((current) => [...current.slice(-2), notice])
+  }
+
+  function showError(title: string, error: unknown) {
+    showNotice(title, 'error', String(error))
+  }
 
   async function loadState(): Promise<AppState> {
     const nextState = await invoke<AppState>('get_app_state')
@@ -184,13 +254,12 @@ function App() {
   async function checkForUpdate(silent = false) {
     setUpdateBusy(true)
     setUpdateProgress('')
-    if (!silent) setMessage('')
 
     try {
       const update = await check()
       if (!update) {
         setUpdateInfo({ currentVersion: appVersion, available: false })
-        if (!silent) setMessage('当前已是最新版本。')
+        if (!silent) showNotice('当前已是最新版本', 'success')
         return
       }
 
@@ -236,14 +305,14 @@ function App() {
             })
             await relaunch()
           } catch (error) {
-            setMessage(`安装更新失败：${String(error)}`)
+            showError('安装更新失败', error)
           } finally {
             setUpdateBusy(false)
           }
         },
       })
     } catch (error) {
-      if (!silent) setMessage(`检查更新失败：${String(error)}`)
+      if (!silent) showError('检查更新失败', error)
     } finally {
       setUpdateBusy(false)
     }
@@ -270,7 +339,7 @@ function App() {
         getVersion().then(setAppVersion).catch(() => setAppVersion(''))
         checkForUpdate(true)
       })
-      .catch((error) => setMessage(String(error)))
+      .catch((error) => showError('加载应用状态失败', error))
   }, [])
 
   useEffect(() => {
@@ -281,7 +350,7 @@ function App() {
   useEffect(() => {
     if (activeMenu !== 'settings' || !state || codexAppIdDetectionStarted.current) return
     codexAppIdDetectionStarted.current = true
-    detectAndSaveCodexAppId(state.settings).catch((error) => setMessage(String(error)))
+    detectAndSaveCodexAppId(state.settings).catch((error) => showError('检测 Codex AppID 失败', error))
   }, [activeMenu, state])
 
   useEffect(() => {
@@ -343,7 +412,6 @@ function App() {
     setFormAuthMode('account')
     setFormApiKey('')
     applyApiProviderPreset('openai')
-    setMessage('')
   }
 
   function startEditProfile(profile: Profile) {
@@ -357,18 +425,15 @@ function App() {
     setFormApiBaseUrl(profile.apiBaseUrl || API_PROVIDER_PRESETS[profile.apiProvider || 'openai'].baseUrl)
     setFormApiRouteEnabled(Boolean(profile.apiRouteEnabled))
     setFormApiRouteModel(profile.apiRouteModel || API_PROVIDER_PRESETS[profile.apiProvider || 'openai'].model)
-    setMessage('')
   }
 
   function showProfile(profileId: string) {
     setActiveMenu('profiles')
     setSelectedProfileId(profileId)
     setMode('detail')
-    setMessage('')
   }
 
   async function chooseAuthJsonFile() {
-    setMessage('')
     try {
       const selected = await open({
         directory: false,
@@ -380,20 +445,22 @@ function App() {
         setFormAuthJsonPath(selected)
       }
     } catch (error) {
-      setMessage(String(error))
+      showError('选择 auth.json 失败', error)
     }
   }
 
   async function runAction(action: () => Promise<string | void>, label = '正在处理...') {
     setBusy(true)
     setLoadingLabel(label)
-    setMessage('')
     try {
       const result = await action()
-      if (result) setMessage(result)
+      if (result) {
+        const tone: NoticeTone = /失败|错误|无法/.test(result) ? 'error' : 'success'
+        showNotice(result, tone)
+      }
       await loadState()
     } catch (error) {
-      setMessage(String(error))
+      showError('操作失败', error)
     } finally {
       setBusy(false)
       setLoadingLabel('')
@@ -563,18 +630,52 @@ function App() {
   async function refreshResources(notify = true) {
     setBusy(true)
     setLoadingLabel('正在刷新共享资源...')
-    if (notify) setMessage('')
     try {
-      const next = await invoke<SharedResources>('get_shared_resources')
+      const [next, plugins] = await Promise.all([
+        invoke<SharedResources>('get_shared_resources'),
+        invoke<SharedPlugins>('get_shared_plugins'),
+      ])
       setResources(next)
+      setSharedPlugins(plugins)
       setAgentsDraft(next.agentsContent)
-      if (notify) setMessage('共享资源已刷新。')
+      if (notify) showNotice('共享资源已刷新', 'success')
     } catch (error) {
-      setMessage(`刷新共享资源失败：${String(error)}`)
+      showError('刷新共享资源失败', error)
     } finally {
       setBusy(false)
       setLoadingLabel('')
     }
+  }
+
+  async function importProfilePlugins() {
+    await runAction(async () => {
+      const result = await invoke<PluginSyncResult>('import_profile_plugins')
+      setSharedPlugins(await invoke<SharedPlugins>('get_shared_plugins'))
+      const detail = [
+        `导入 ${result.imported}`,
+        `同步 ${result.updated}`,
+        `跳过 ${result.skipped}`,
+        result.conflicts.length ? `冲突 ${result.conflicts.length}` : '',
+        result.profileErrors.length ? `失败 ${result.profileErrors.length}` : '',
+      ].filter(Boolean).join('，')
+      if (result.conflicts.length || result.profileErrors.length) {
+        showNotice('插件汇总完成，但有项目需要处理', 'error', [...result.conflicts, ...result.profileErrors].join('\n'))
+        return
+      }
+      return `插件汇总完成：${detail}。`
+    }, '正在汇总并同步插件...')
+  }
+
+  async function syncSharedPlugins() {
+    await runAction(async () => {
+      const result = await invoke<PluginSyncResult>('sync_shared_plugins')
+      setSharedPlugins(await invoke<SharedPlugins>('get_shared_plugins'))
+      if (result.profileErrors.length) {
+        showNotice('部分 Profile 同步失败', 'error', result.profileErrors.join('\n'))
+        return
+      }
+      return `插件同步完成：更新 ${result.updated} 个，已是最新 ${result.skipped} 个。`
+    }, '正在同步共享插件...')
   }
 
   async function importCodexSkills() {
@@ -706,8 +807,6 @@ function App() {
           )}
         </section>
 
-        {message && <div className="message" role="status" aria-live="polite">{message}</div>}
-
         {activeMenu === 'profiles' ? (
           <>
             <section className="stats-grid">
@@ -838,11 +937,14 @@ function App() {
           <ResourcesPanel
             busy={busy}
             draft={agentsDraft}
+            plugins={sharedPlugins}
             resources={resources}
             onChange={setAgentsDraft}
             onImport={importCodexSkills}
+            onImportPlugins={importProfilePlugins}
             onRefresh={() => refreshResources(true)}
             onSave={saveAgents}
+            onSyncPlugins={syncSharedPlugins}
           />
         ) : activeMenu === 'settings' ? (
           <section className="settings-grid">
@@ -973,9 +1075,16 @@ function App() {
           onConfirm={confirmAndClose}
         />
       )}
-      {(busy || updateBusy) && (
-        <div className="loading-toast" role="status" aria-live="polite">
-          <LoadingIndicator label={loadingLabel || updateProgress || '正在检查更新...'} />
+      {(notices.length > 0 || busy || updateBusy) && (
+        <div className="toast-region" aria-live="polite" aria-relevant="additions">
+          {(busy || updateBusy) && (
+            <div className="loading-toast" role="status">
+              <LoadingIndicator label={loadingLabel || updateProgress || '正在检查更新...'} />
+            </div>
+          )}
+          {notices.map((notice) => (
+            <NoticeToast key={notice.id} notice={notice} onDismiss={dismissNotice} />
+          ))}
         </div>
       )}
     </main>
@@ -985,13 +1094,16 @@ function App() {
 function ResourcesPanel(props: {
   busy: boolean
   draft: string
+  plugins: SharedPlugins | null
   resources: SharedResources | null
   onChange: (value: string) => void
   onImport: () => void
+  onImportPlugins: () => void
   onRefresh: () => void
   onSave: () => void
+  onSyncPlugins: () => void
 }) {
-  const [activeResourceView, setActiveResourceView] = useState<'prompt' | 'skills'>('prompt')
+  const [activeResourceView, setActiveResourceView] = useState<'prompt' | 'skills' | 'plugins'>('prompt')
   const [skillQuery, setSkillQuery] = useState('')
   if (!props.resources) {
     return <section className="panel resource-loading"><LoadingIndicator label="正在读取共享资源..." /></section>
@@ -1017,6 +1129,9 @@ function ResourcesPanel(props: {
           </button>
           <button className={activeResourceView === 'skills' ? 'active' : ''} onClick={() => setActiveResourceView('skills')} role="tab" aria-selected={activeResourceView === 'skills'} type="button">
             Skills <span className="tab-count">{props.resources.skills.length}</span>
+          </button>
+          <button className={activeResourceView === 'plugins' ? 'active' : ''} onClick={() => setActiveResourceView('plugins')} role="tab" aria-selected={activeResourceView === 'plugins'} type="button">
+            插件 <span className="tab-count">{props.plugins?.plugins.length || 0}</span>
           </button>
         </div>
         <button className="secondary-action compact" disabled={props.busy} onClick={props.onRefresh} type="button">
@@ -1044,7 +1159,7 @@ function ResourcesPanel(props: {
             value={props.draft}
           />
         </div>
-      ) : (
+      ) : activeResourceView === 'skills' ? (
         <div className="resource-view skills-view" role="tabpanel">
           <div className="skills-view-heading">
             <div className="section-title">
@@ -1087,6 +1202,61 @@ function ResourcesPanel(props: {
                 </div>
               </section>
             )) : <div className="empty-state skill-empty"><h2>没有匹配的 Skills</h2><p>尝试缩短关键词或刷新磁盘内容。</p></div>}
+          </div>
+        </div>
+      ) : (
+        <div className="resource-view skills-view" role="tabpanel">
+          <div className="skills-view-heading">
+            <div className="section-title">
+              <div className="resource-title-line"><span className="resource-icon plugins">P</span><h2>共享插件</h2></div>
+              <p>第三方插件统一保存在 ~/.agents，并默认同步到所有托管 Profile。</p>
+            </div>
+            <div className="skills-view-actions">
+              <button className="secondary-action compact" disabled={props.busy} onClick={props.onImportPlugins} type="button">
+                汇总现有插件
+              </button>
+              <button className="primary-action compact" disabled={props.busy} onClick={props.onSyncPlugins} type="button">
+                同步所有 Profile
+              </button>
+            </div>
+          </div>
+          <div className="skill-source-paths">
+            <code>{props.plugins?.marketplacePath || '~/.agents/plugins/marketplace.json'}</code>
+          </div>
+          <div className="skill-groups">
+            {props.plugins?.plugins.length ? (
+              <section className="skill-group">
+                <header className="skill-group-heading">
+                  <div>
+                    <h3>全局共享</h3>
+                    <p>官方内置插件不在此处管理</p>
+                  </div>
+                  <span>{props.plugins.plugins.length}</span>
+                </header>
+                <div className="skill-list">
+                  {props.plugins.plugins.map((plugin) => {
+                    const fullySynced = plugin.syncedProfiles === plugin.totalProfiles
+                    return (
+                      <article className="skill-list-row" key={`${plugin.name}@${plugin.version}`}>
+                        <div className="skill-identity">
+                          <strong>{plugin.name}</strong>
+                          <span className={`skill-source ${fullySynced ? 'shared' : 'legacy'}`}>v{plugin.version}</span>
+                        </div>
+                        <div className="skill-detail">
+                          <p>已同步 {plugin.syncedProfiles}/{plugin.totalProfiles} 个 Profile</p>
+                          <code>{plugin.path}</code>
+                        </div>
+                      </article>
+                    )
+                  })}
+                </div>
+              </section>
+            ) : (
+              <div className="empty-state skill-empty">
+                <h2>还没有共享插件</h2>
+                <p>点击“汇总现有插件”，从所有 Profile 收集第三方插件。</p>
+              </div>
+            )}
           </div>
         </div>
       )}
