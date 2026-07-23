@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.8 - Unreleased
+## 0.2.8 - 2026-07-23
 
 - Added a shared third-party plugin library under `~/.agents/plugins`, with import from managed Profiles and synchronization back to every managed Profile.
 - Added a generated local `agents-shared` marketplace and Profile configuration updates so shared plugins remain available without mixing official plugin caches into the library.

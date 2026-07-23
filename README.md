@@ -124,4 +124,4 @@ npm run tauri:build
 
 Also update `CHANGELOG.md`, `README.md`, and `README.zh-CN.md` before tagging a release.
 
-Current public release: `0.2.7`. Version `0.2.8` is in development.
+Current release: `0.2.8`.

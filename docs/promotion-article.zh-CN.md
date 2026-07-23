@@ -97,7 +97,7 @@ Codex Switch Helper 提供了共享资源页面：
 2. 新建 Profile，选择账号登录或 API Key 登录；
 3. 点击启动，在独立的 Codex 窗口里开始工作。
 
-截至 2026 年 7 月 23 日，当前公开版本为 **v0.2.7**，v0.2.8 正在开发中。项目仍在快速迭代，如果你依赖复杂的企业凭据策略，建议先阅读 README 中的本地存储说明。
+截至 2026 年 7 月 23 日，最新版本为 **v0.2.8**。项目仍在快速迭代，如果你依赖复杂的企业凭据策略，建议先阅读 README 中的本地存储说明。
 
 ## 如果它替你省掉一次重复登录，请顺手点个 Star
 
@@ -122,7 +122,7 @@ Codex Switch Helper 提供了共享资源页面：
 ## 事实核查说明
 
 - 项目定位、Profile 隔离、并行实例、账号/API Key 登录、共享 AGENTS.md 与 Skills、代理、确认弹窗、系统托盘和更新能力，依据仓库 `README.zh-CN.md`、`CHANGELOG.md`、`src/main.tsx` 与 `src-tauri/tauri.conf.json`。
-- v0.2.8 的功能与版本信息依据待发布代码、README、CHANGELOG 和 Tauri 配置核对；在正式发布前，GitHub Releases 中的最新稳定版本仍应为 v0.2.7。
+- v0.2.8 的功能与版本信息依据发布代码、README、CHANGELOG 和 Tauri 配置核对，并以 GitHub Releases 页面作为公开版本依据。
 - “尽量保持响应”是对异步 Profile 检查、启动准备和进程查询机制的体验性概括，不代表所有设备上的性能承诺。
 - 文章没有宣称该工具会加密本地凭据；当前 API Key 及保存的 auth/config 数据明文存储在本地 JSON 中。
 - 文中三张图片均于 2026 年 7 月 23 日从正在运行的应用重新截取，并添加统一项目水印；未继续使用仓库中的旧截图。
