@@ -1629,6 +1629,9 @@ fn apply_profile_auth_files_to_home(
         AuthMode::Account => {
             let auth_json = profile.auth_json.as_deref();
             let auth_path = codex_home.join("auth.json");
+            if auth_path.is_file() {
+                return Ok(());
+            }
             if auth_json.is_none() && !require_stored_account_auth {
                 return Ok(());
             }
@@ -2529,6 +2532,42 @@ enabled = true
 
         assert!(apply_profile_auth_files_to_home(&profile, &home, false).is_ok());
         assert!(!home.exists());
+    }
+
+    #[test]
+    fn account_profile_keeps_refreshed_auth_on_launch() {
+        let home = env::temp_dir().join(format!("codex-profile-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&home).unwrap();
+        fs::write(home.join("auth.json"), "refreshed credentials").unwrap();
+        let profile = Profile {
+            auth_json: Some("imported credentials".to_string()),
+            ..account_profile(&home)
+        };
+
+        apply_profile_auth_files_to_home(&profile, &home, false).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(home.join("auth.json")).unwrap(),
+            "refreshed credentials"
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn account_profile_restores_imported_auth_when_file_is_missing() {
+        let home = env::temp_dir().join(format!("codex-profile-test-{}", Uuid::new_v4()));
+        let profile = Profile {
+            auth_json: Some("imported credentials".to_string()),
+            ..account_profile(&home)
+        };
+
+        apply_profile_auth_files_to_home(&profile, &home, false).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(home.join("auth.json")).unwrap(),
+            "imported credentials"
+        );
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

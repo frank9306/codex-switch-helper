@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.9 - 2026-07-29
+
+- Preserved refreshed account credentials when launching a managed Profile instead of overwriting them with the originally imported `auth.json`, preventing repeated sign-in prompts.
+- Kept the imported `auth.json` as a recovery source when a managed Profile does not yet have a credentials file.
+
 ## 0.2.8 - 2026-07-23
 
 - Added a shared third-party plugin library under `~/.agents/plugins`, with import from managed Profiles and synchronization back to every managed Profile.
