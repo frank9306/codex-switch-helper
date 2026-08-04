@@ -723,6 +723,7 @@ fn apply_proxy_process_env(command: &mut Command, settings: &AppSettings) -> Res
         let proxy = proxy_url(settings)?;
         let no_proxy = loopback_no_proxy_value(env::var_os(NO_PROXY_ENV_KEY));
         command
+            .arg(format!("--proxy-server={proxy}"))
             .env(HTTP_PROXY_ENV_KEY, &proxy)
             .env(HTTPS_PROXY_ENV_KEY, &proxy)
             .env(ALL_PROXY_ENV_KEY, &proxy)
@@ -3193,6 +3194,28 @@ enabled = true
         for loopback in LOOPBACK_NO_PROXY.split(',') {
             assert!(value.split(',').any(|entry| entry == loopback));
         }
+    }
+
+    #[test]
+    fn proxied_codex_process_configures_chromium_network_service() {
+        let settings = AppSettings {
+            proxy_enabled: true,
+            proxy_protocol: "http".to_string(),
+            proxy_host: "127.0.0.1".to_string(),
+            proxy_port: "7890".to_string(),
+            ..AppSettings::default()
+        };
+        let mut command = Command::new("cmd.exe");
+
+        apply_proxy_process_env(&mut command, &settings).unwrap();
+
+        assert_eq!(
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy())
+                .collect::<Vec<_>>(),
+            vec!["--proxy-server=http://127.0.0.1:7890"]
+        );
     }
 
     #[test]

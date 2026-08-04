@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.11 - 2026-08-04
+
+- Routed the Codex desktop Chromium network service through the configured HTTP or SOCKS5 proxy, preventing long startup waits without TUN mode while preserving proxy environment variables for AI conversations and child processes.
+
 ## 0.2.10 - 2026-08-04
 
 - Added automatic Skills and third-party plugin synchronization when the app starts or shared resources are refreshed.
