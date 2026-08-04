@@ -14,8 +14,8 @@ Tauri desktop helper for switching Codex App profiles on Windows.
 - Gives every Profile an isolated tool-managed Home.
 - Supports account-login Profiles and API-key Profiles.
 - Edits and refreshes one global `~/.agents/AGENTS.md`, linked into every managed Profile Home.
-- Discovers Skills in both `~/.agents/skills` and `~/.codex/skills`, with a non-overwriting import into the shared directory.
-- Collects third-party Plugins from managed Profiles into `~/.agents/plugins` and synchronizes them to every managed Profile through a local `agents-shared` Marketplace.
+- Automatically imports missing Skills from `~/.codex/skills` into the shared directory without overwriting existing entries.
+- Automatically collects third-party Plugins from managed Profiles into `~/.agents/plugins` and synchronizes them to every managed Profile through a local `agents-shared` Marketplace.
 - Supports HTTP and SOCKS5 proxy settings for the helper app and Codex launches.
 - Runs multiple isolated Codex instances in parallel.
 - Keeps the helper responsive during active Codex tasks by performing Profile inspection, launch preparation, and process checks outside the UI event thread.
@@ -43,9 +43,9 @@ Tauri desktop helper for switching Codex App profiles on Windows.
 
 ## Shared AGENTS.md, Skills, And Plugins
 
-- The global `~/.agents/AGENTS.md` is linked into every managed Profile Home and can be viewed, edited, and refreshed in the app.
-- The Skills view discovers both `~/.agents/skills` and `~/.codex/skills`; imports add only missing entries and never overwrite an existing shared Skill.
-- The Plugins view can collect third-party plugins from all managed Profiles and synchronize the shared versions back to every managed Profile.
+- The global `~/.agents/AGENTS.md` is linked into every managed Profile Home and can be viewed, edited, refreshed, and inspected for its last modification time in the app.
+- The Skills view shows version and update metadata, supports source-aware update checks and protected deletion, and automatically imports only missing entries without overwriting an existing shared Skill.
+- The Plugins view shows version and update metadata, supports source-aware update checks and protected deletion, and automatically synchronizes shared versions to every managed Profile.
 - Shared plugins live under `~/.agents/plugins/<plugin>/<version>`, with the local Marketplace manifest at `~/.agents/plugins/marketplace.json`.
 - Plugins from OpenAI bundled or official Marketplaces are excluded from the shared library.
 - Same-name, same-version plugins with different contents are reported as conflicts instead of being overwritten silently.
@@ -124,4 +124,4 @@ npm run tauri:build
 
 Also update `CHANGELOG.md`, `README.md`, and `README.zh-CN.md` before tagging a release.
 
-Current release: `0.2.9`.
+Current release: `0.2.10`.

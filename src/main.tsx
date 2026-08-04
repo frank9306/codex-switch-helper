@@ -125,8 +125,21 @@ type ConnectionTestResult = {
 type SharedResources = {
   agentsPath: string
   agentsContent: string
+  agentsUpdatedAt?: string | null
   skillsPaths: string[]
-  skills: Array<{ name: string; path: string; source: string; shared: boolean; description?: string | null }>
+  skills: Array<{
+    name: string
+    version?: string | null
+    path: string
+    source: string
+    shared: boolean
+    description?: string | null
+    managed: boolean
+    sourceType?: string | null
+    sourceLabel?: string | null
+    canUpdate: boolean
+    updatedAt?: string | null
+  }>
 }
 
 type SkillImportResult = {
@@ -142,7 +155,28 @@ type SharedPlugins = {
     path: string
     syncedProfiles: number
     totalProfiles: number
+    managed: boolean
+    sourceType?: string | null
+    sourceLabel?: string | null
+    canUpdate: boolean
+    updatedAt?: string | null
   }>
+}
+
+type ResourceKind = 'skill' | 'plugin'
+
+type ResourceOperationResult = {
+  succeeded: string[]
+  skipped: string[]
+  failed: string[]
+  profileErrors: string[]
+}
+
+type ResourceUpdateCheck = {
+  name: string
+  updateAvailable: boolean
+  currentVersion?: string | null
+  latestVersion?: string | null
 }
 
 type PluginSyncResult = {
@@ -151,6 +185,15 @@ type PluginSyncResult = {
   skipped: number
   conflicts: string[]
   profileErrors: string[]
+}
+
+type AutomaticResourceSyncResult = {
+  skills: SkillImportResult
+  plugins: PluginSyncResult
+}
+
+function formatResourceTime(value?: string | null) {
+  return value ? new Date(value).toLocaleString() : '未知'
 }
 
 type CodexInstance = {
@@ -215,7 +258,9 @@ function App() {
   const [instances, setInstances] = useState<CodexInstance[]>([])
   const [profileInspection, setProfileInspection] = useState<ProfileInspection | null>(null)
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null)
+  const [gitInstallKind, setGitInstallKind] = useState<ResourceKind | null>(null)
   const codexAppIdDetectionStarted = useRef(false)
+  const resourceSyncStarted = useRef(false)
   const noticeId = useRef(0)
 
   function dismissNotice(id: number) {
@@ -338,6 +383,8 @@ function App() {
       .then(() => {
         getVersion().then(setAppVersion).catch(() => setAppVersion(''))
         checkForUpdate(true)
+        resourceSyncStarted.current = true
+        refreshResources(false)
       })
       .catch((error) => showError('加载应用状态失败', error))
   }, [])
@@ -354,7 +401,8 @@ function App() {
   }, [activeMenu, state])
 
   useEffect(() => {
-    if (activeMenu !== 'resources' || resources) return
+    if (activeMenu !== 'resources' || resources || resourceSyncStarted.current) return
+    resourceSyncStarted.current = true
     refreshResources(false)
   }, [activeMenu, resources])
 
@@ -631,6 +679,7 @@ function App() {
     setBusy(true)
     setLoadingLabel('正在刷新共享资源...')
     try {
+      const syncResult = await invoke<AutomaticResourceSyncResult>('auto_sync_resources')
       const [next, plugins] = await Promise.all([
         invoke<SharedResources>('get_shared_resources'),
         invoke<SharedPlugins>('get_shared_plugins'),
@@ -638,7 +687,16 @@ function App() {
       setResources(next)
       setSharedPlugins(plugins)
       setAgentsDraft(next.agentsContent)
-      if (notify) showNotice('共享资源已刷新', 'success')
+      const syncIssues = [...syncResult.plugins.conflicts, ...syncResult.plugins.profileErrors]
+      if (syncIssues.length) {
+        showNotice('共享资源已刷新，但自动同步有异常', 'error', syncIssues.join('\n'))
+      } else if (notify) {
+        showNotice(
+          '共享资源已刷新并同步',
+          'success',
+          `导入 Skill ${syncResult.skills.imported} 个，同步插件 ${syncResult.plugins.updated} 个。`,
+        )
+      }
     } catch (error) {
       showError('刷新共享资源失败', error)
     } finally {
@@ -647,45 +705,125 @@ function App() {
     }
   }
 
-  async function importProfilePlugins() {
-    await runAction(async () => {
-      const result = await invoke<PluginSyncResult>('import_profile_plugins')
-      setSharedPlugins(await invoke<SharedPlugins>('get_shared_plugins'))
-      const detail = [
-        `导入 ${result.imported}`,
-        `同步 ${result.updated}`,
-        `跳过 ${result.skipped}`,
-        result.conflicts.length ? `冲突 ${result.conflicts.length}` : '',
-        result.profileErrors.length ? `失败 ${result.profileErrors.length}` : '',
-      ].filter(Boolean).join('，')
-      if (result.conflicts.length || result.profileErrors.length) {
-        showNotice('插件汇总完成，但有项目需要处理', 'error', [...result.conflicts, ...result.profileErrors].join('\n'))
-        return
-      }
-      return `插件汇总完成：${detail}。`
-    }, '正在汇总并同步插件...')
+  function operationSummary(result: ResourceOperationResult) {
+    const summary = [
+      result.succeeded.length ? `成功 ${result.succeeded.length}` : '',
+      result.skipped.length ? `跳过 ${result.skipped.length}` : '',
+      result.failed.length ? `失败 ${result.failed.length}` : '',
+      result.profileErrors.length ? `Profile 同步失败 ${result.profileErrors.length}` : '',
+    ].filter(Boolean).join('，')
+    const details = [...result.failed, ...result.profileErrors]
+    if (details.length) showNotice(`资源操作完成：${summary}`, 'error', details.join('\n'))
+    return details.length ? undefined : `资源操作完成：${summary || '无变更'}。`
   }
 
-  async function syncSharedPlugins() {
-    await runAction(async () => {
-      const result = await invoke<PluginSyncResult>('sync_shared_plugins')
-      setSharedPlugins(await invoke<SharedPlugins>('get_shared_plugins'))
-      if (result.profileErrors.length) {
-        showNotice('部分 Profile 同步失败', 'error', result.profileErrors.join('\n'))
-        return
-      }
-      return `插件同步完成：更新 ${result.updated} 个，已是最新 ${result.skipped} 个。`
-    }, '正在同步共享插件...')
+  async function refreshResourceLists() {
+    const [nextResources, nextPlugins] = await Promise.all([
+      invoke<SharedResources>('get_shared_resources'),
+      invoke<SharedPlugins>('get_shared_plugins'),
+    ])
+    setResources(nextResources)
+    setSharedPlugins(nextPlugins)
+    setAgentsDraft(nextResources.agentsContent)
   }
 
-  async function importCodexSkills() {
+  async function installLocalResource(kind: ResourceKind) {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: kind === 'skill' ? '选择包含 SKILL.md 的目录' : '选择包含 .codex-plugin/plugin.json 的目录',
+      })
+      if (typeof selected !== 'string') return
+      requestConfirm({
+        title: `从本地添加${kind === 'skill' ? ' Skill' : '插件'}`,
+        body: '将校验并复制该目录；若存在同名资源，将以新内容替换。',
+        confirmLabel: '添加资源',
+        intent: 'warning',
+        details: [selected],
+        onConfirm: async () => {
+          await runAction(async () => {
+            const result = await invoke<ResourceOperationResult>('install_resource', {
+              kind,
+              sourceType: 'local',
+              source: selected,
+              subpath: null,
+            })
+            await refreshResourceLists()
+            return operationSummary(result)
+          }, '正在安装本地资源...')
+        },
+      })
+    } catch (error) {
+      showError('选择资源目录失败', error)
+    }
+  }
+
+  async function installGitResource(kind: ResourceKind, source: string, subpath: string) {
+    setGitInstallKind(null)
     await runAction(async () => {
-      const result = await invoke<SkillImportResult>('import_codex_skills')
-      const next = await invoke<SharedResources>('get_shared_resources')
-      setResources(next)
-      setAgentsDraft(next.agentsContent)
-      return `Skills 导入完成：新增 ${result.imported} 个，跳过同名 ${result.skipped} 个。`
-    }, '正在导入 ~/.codex/skills...')
+      const result = await invoke<ResourceOperationResult>('install_resource', {
+        kind,
+        sourceType: 'git',
+        source,
+        subpath: subpath.trim() || null,
+      })
+      await refreshResourceLists()
+      return operationSummary(result)
+    }, '正在从 Git 下载并安装...')
+  }
+
+  async function checkResourceUpdate(kind: ResourceKind, name: string) {
+    setBusy(true)
+    setLoadingLabel(`正在检查 ${name}...`)
+    try {
+      const result = await invoke<ResourceUpdateCheck>('check_resource_update', { kind, name })
+      if (!result.updateAvailable) {
+        showNotice(`${name} 已是最新`, 'success')
+        return
+      }
+      const versionDetail = result.latestVersion
+        ? `当前 ${result.currentVersion || '未知'}，可更新到 ${result.latestVersion}。`
+        : '来源内容已有变化。'
+      requestConfirm({
+        title: `发现更新：${name}`,
+        body: versionDetail,
+        confirmLabel: '立即更新',
+        intent: 'warning',
+        onConfirm: async () => {
+          await runAction(async () => {
+            const updated = await invoke<ResourceOperationResult>('update_resource', { kind, name })
+            await refreshResourceLists()
+            return operationSummary(updated)
+          }, `正在更新 ${name}...`)
+        },
+      })
+    } catch (error) {
+      showError(`检查 ${name} 更新失败`, error)
+    } finally {
+      setBusy(false)
+      setLoadingLabel('')
+    }
+  }
+
+  function deleteResource(kind: ResourceKind, name: string) {
+    requestConfirm({
+      title: `删除${kind === 'skill' ? ' Skill' : '插件'}：${name}`,
+      body: kind === 'plugin'
+        ? '将删除共享插件、全部托管 Profile 中的同步缓存和对应启用配置。'
+        : '将删除 ~/.agents/skills 中的共享 Skill。',
+      confirmLabel: '删除资源',
+      intent: 'danger',
+      requireText: name,
+      requireTextLabel: `输入 ${name} 确认`,
+      onConfirm: async () => {
+        await runAction(async () => {
+          const result = await invoke<ResourceOperationResult>('delete_resource', { kind, name })
+          await refreshResourceLists()
+          return operationSummary(result)
+        }, `正在删除 ${name}...`)
+      },
+    })
   }
 
   async function saveAgents() {
@@ -940,11 +1078,12 @@ function App() {
             plugins={sharedPlugins}
             resources={resources}
             onChange={setAgentsDraft}
-            onImport={importCodexSkills}
-            onImportPlugins={importProfilePlugins}
             onRefresh={() => refreshResources(true)}
             onSave={saveAgents}
-            onSyncPlugins={syncSharedPlugins}
+            onAddLocal={installLocalResource}
+            onAddGit={setGitInstallKind}
+            onCheckUpdate={checkResourceUpdate}
+            onDelete={deleteResource}
           />
         ) : activeMenu === 'settings' ? (
           <section className="settings-grid">
@@ -1075,6 +1214,14 @@ function App() {
           onConfirm={confirmAndClose}
         />
       )}
+      {gitInstallKind && (
+        <ResourceInstallDialog
+          busy={busy}
+          kind={gitInstallKind}
+          onCancel={() => setGitInstallKind(null)}
+          onInstall={installGitResource}
+        />
+      )}
       {(notices.length > 0 || busy || updateBusy) && (
         <div className="toast-region" aria-live="polite" aria-relevant="additions">
           {(busy || updateBusy) && (
@@ -1097,11 +1244,12 @@ function ResourcesPanel(props: {
   plugins: SharedPlugins | null
   resources: SharedResources | null
   onChange: (value: string) => void
-  onImport: () => void
-  onImportPlugins: () => void
   onRefresh: () => void
   onSave: () => void
-  onSyncPlugins: () => void
+  onAddLocal: (kind: ResourceKind) => void
+  onAddGit: (kind: ResourceKind) => void
+  onCheckUpdate: (kind: ResourceKind, name: string) => void
+  onDelete: (kind: ResourceKind, name: string) => void
 }) {
   const [activeResourceView, setActiveResourceView] = useState<'prompt' | 'skills' | 'plugins'>('prompt')
   const [skillQuery, setSkillQuery] = useState('')
@@ -1125,7 +1273,7 @@ function ResourcesPanel(props: {
       <div className="resource-workspace-toolbar">
         <div className="segmented resource-tabs" role="tablist" aria-label="共享资源类型">
           <button className={activeResourceView === 'prompt' ? 'active' : ''} onClick={() => setActiveResourceView('prompt')} role="tab" aria-selected={activeResourceView === 'prompt'} type="button">
-            全局提示词
+            AGENTS.md
           </button>
           <button className={activeResourceView === 'skills' ? 'active' : ''} onClick={() => setActiveResourceView('skills')} role="tab" aria-selected={activeResourceView === 'skills'} type="button">
             Skills <span className="tab-count">{props.resources.skills.length}</span>
@@ -1146,6 +1294,7 @@ function ResourcesPanel(props: {
               <div className="resource-title-line"><span className="resource-icon">A</span><h2>AGENTS.md</h2></div>
               <p>所有托管 Profile 共用的全局提示词。</p>
               <code>{props.resources.agentsPath || '~/.agents/AGENTS.md'}</code>
+              <small className="resource-updated-time">最后修改：{formatResourceTime(props.resources.agentsUpdatedAt)}</small>
             </div>
             <button className="primary-action compact" disabled={props.busy} onClick={props.onSave} type="button">
               保存提示词
@@ -1168,8 +1317,11 @@ function ResourcesPanel(props: {
             </div>
             <div className="skills-view-actions">
               <input aria-label="搜索 Skills" onChange={(event) => setSkillQuery(event.target.value)} placeholder="搜索 Skills" type="search" value={skillQuery} />
-              <button className="secondary-action compact" disabled={props.busy} onClick={props.onImport} type="button">
-                导入 ~/.codex
+              <button className="secondary-action compact" disabled={props.busy} onClick={() => props.onAddLocal('skill')} type="button">
+                从本地添加
+              </button>
+              <button className="secondary-action compact" disabled={props.busy} onClick={() => props.onAddGit('skill')} type="button">
+                从 Git 添加
               </button>
             </div>
           </div>
@@ -1192,11 +1344,20 @@ function ResourcesPanel(props: {
                       <div className="skill-identity">
                         <strong>{skill.name}</strong>
                         <span className={`skill-source ${skill.shared ? 'shared' : 'legacy'}`}>{skill.source}</span>
+                        <span className="resource-version">{skill.version ? `v${skill.version}` : '版本未声明'}</span>
                       </div>
                       <div className="skill-detail">
                         <p>{skill.description || '未提供说明'}</p>
                         <code>{skill.path}</code>
+                        <small className="resource-updated-time">最后更新：{formatResourceTime(skill.updatedAt)}</small>
+                        {skill.sourceLabel && <small className="resource-origin">来源：{skill.sourceLabel}</small>}
                       </div>
+                      {skill.shared && (
+                        <div className="resource-row-actions">
+                          <button className="secondary-action compact" disabled={props.busy || !skill.canUpdate} title={skill.canUpdate ? '检查来源是否有新版本' : '未记录安装来源，无法检查更新'} onClick={() => props.onCheckUpdate('skill', skill.name)} type="button">检查更新</button>
+                          <button className="danger compact" disabled={props.busy} onClick={() => props.onDelete('skill', skill.name)} type="button">删除</button>
+                        </div>
+                      )}
                     </article>
                   ))}
                 </div>
@@ -1212,11 +1373,11 @@ function ResourcesPanel(props: {
               <p>第三方插件统一保存在 ~/.agents，并默认同步到所有托管 Profile。</p>
             </div>
             <div className="skills-view-actions">
-              <button className="secondary-action compact" disabled={props.busy} onClick={props.onImportPlugins} type="button">
-                汇总现有插件
+              <button className="secondary-action compact" disabled={props.busy} onClick={() => props.onAddLocal('plugin')} type="button">
+                从本地添加
               </button>
-              <button className="primary-action compact" disabled={props.busy} onClick={props.onSyncPlugins} type="button">
-                同步所有 Profile
+              <button className="secondary-action compact" disabled={props.busy} onClick={() => props.onAddGit('plugin')} type="button">
+                从 Git 添加
               </button>
             </div>
           </div>
@@ -1245,6 +1406,12 @@ function ResourcesPanel(props: {
                         <div className="skill-detail">
                           <p>已同步 {plugin.syncedProfiles}/{plugin.totalProfiles} 个 Profile</p>
                           <code>{plugin.path}</code>
+                          <small className="resource-updated-time">最后更新：{formatResourceTime(plugin.updatedAt)}</small>
+                          {plugin.sourceLabel && <small className="resource-origin">来源：{plugin.sourceLabel}</small>}
+                        </div>
+                        <div className="resource-row-actions">
+                          <button className="secondary-action compact" disabled={props.busy || !plugin.canUpdate} title={plugin.canUpdate ? '检查来源是否有新版本' : '未记录安装来源，无法检查更新'} onClick={() => props.onCheckUpdate('plugin', plugin.name)} type="button">检查更新</button>
+                          <button className="danger compact" disabled={props.busy} onClick={() => props.onDelete('plugin', plugin.name)} type="button">删除</button>
                         </div>
                       </article>
                     )
@@ -1266,6 +1433,44 @@ function ResourcesPanel(props: {
 
 function LoadingIndicator(props: { label: string }) {
   return <span className="loading-indicator"><span className="spinner" aria-hidden="true" />{props.label}</span>
+}
+
+function ResourceInstallDialog(props: {
+  busy: boolean
+  kind: ResourceKind
+  onCancel: () => void
+  onInstall: (kind: ResourceKind, source: string, subpath: string) => void
+}) {
+  const [source, setSource] = useState('')
+  const [subpath, setSubpath] = useState('')
+  const valid = /^https?:\/\/\S+$/i.test(source.trim())
+
+  return (
+    <div className="confirm-backdrop" role="presentation">
+      <section aria-modal="true" className="confirm-dialog resource-install-dialog" role="dialog">
+        <div className="confirm-heading">
+          <span className="confirm-icon">G</span>
+          <div className="section-title">
+            <h2>从 Git 添加{props.kind === 'skill' ? ' Skill' : '插件'}</h2>
+            <p>使用仓库默认分支；可填写资源所在的仓库相对目录。</p>
+          </div>
+        </div>
+        <label>
+          Git 仓库 URL
+          <input autoFocus onChange={(event) => setSource(event.target.value)} placeholder="https://github.com/owner/repository.git" type="url" value={source} />
+        </label>
+        <label>
+          仓库子目录（可选）
+          <input onChange={(event) => setSubpath(event.target.value)} placeholder={props.kind === 'skill' ? 'skills/example' : 'plugins/example'} value={subpath} />
+        </label>
+        <p className="hint">不支持私有仓库认证。若存在同名资源，校验成功后会替换。</p>
+        <div className="confirm-actions">
+          <button className="secondary-action" disabled={props.busy} onClick={props.onCancel} type="button">取消</button>
+          <button className="primary-action" disabled={props.busy || !valid} onClick={() => props.onInstall(props.kind, source.trim(), subpath.trim())} type="button">下载并安装</button>
+        </div>
+      </section>
+    </div>
+  )
 }
 
 function ConfirmDialog(props: {

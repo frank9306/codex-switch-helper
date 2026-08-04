@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "standard": "polyharness",
+  "standardVersion": "1.0.0",
+  "workspaces": [
+    {
+      "id": "root",
+      "path": ".",
+      "recipe": "tauri-react",
+      "capabilities": [
+        {
+          "id": "gui",
+          "parameters": {
+            "desktopFramework": "tauri",
+            "backendLanguage": "rust",
+            "backendRuntime": "rust",
+            "backendPackageManager": "cargo",
+            "frontendLanguage": "typescript",
+            "frontendFramework": "react",
+            "buildTool": "vite",
+            "frontendPackageManager": "npm",
+            "packageManager": "npm",
+            "cssFramework": "plain-css",
+            "componentSystem": "project-local",
+            "typeChecker": "tsc",
+            "linter": "none",
+            "formatter": "rustfmt",
+            "backendTestRunner": "cargo-test",
+            "frontendTestRunner": "none",
+            "e2eTestRunner": "none",
+            "packager": "tauri-build"
+          }
+        },
+        {
+          "id": "web-ui",
+          "parameters": {
+            "desktopFramework": "tauri",
+            "backendLanguage": "rust",
+            "backendRuntime": "rust",
+            "backendPackageManager": "cargo",
+            "frontendLanguage": "typescript",
+            "frontendFramework": "react",
+            "buildTool": "vite",
+            "frontendPackageManager": "npm",
+            "packageManager": "npm",
+            "cssFramework": "plain-css",
+            "componentSystem": "project-local",
+            "typeChecker": "tsc",
+            "linter": "none",
+            "formatter": "rustfmt",
+            "backendTestRunner": "cargo-test",
+            "frontendTestRunner": "none",
+            "e2eTestRunner": "none",
+            "packager": "tauri-build"
+          }
+        }
+      ],
+      "commands": {
+        "setup": "npm install",
+        "dev": "npm run tauri:dev",
+        "lint": null,
+        "typecheck": "npx tsc --noEmit",
+        "test": "cargo test --manifest-path src-tauri/Cargo.toml",
+        "browser-test": null,
+        "build": "npm run tauri:build",
+        "check": "npm run build && cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo check --manifest-path src-tauri/Cargo.toml"
+      },
+      "knowledge": {
+        "agentMap": "AGENTS.md",
+        "architecture": null,
+        "security": null,
+        "reliability": null
+      },
+      "evidencePolicy": {
+        "required": [
+          "command-results",
+          "changed-files",
+          "unverified-areas"
+        ]
+      },
+      "approvalBoundaries": [
+        "Delete files, user data, or managed Profile data",
+        "Run database migrations",
+        "Change authentication or authorization behavior",
+        "Add dependencies or upgrade major dependency versions",
+        "Stage, commit, push, create branches or pull requests, publish, or release"
+      ],
+      "checks": {
+        "rust-tests": {
+          "command": "cargo test --manifest-path src-tauri/Cargo.toml",
+          "severity": "required"
+        }
+      }
+    }
+  ],
+  "exceptions": []
+}

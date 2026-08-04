@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.10 - 2026-08-04
+
+- Added automatic Skills and third-party plugin synchronization when the app starts or shared resources are refreshed.
+- Added versions, last-updated times, source-aware update checks, and protected deletion actions for shared Skills and plugins.
+- Added the last-modified time for the shared `AGENTS.md` and stabilized the resource tabs so switching views no longer changes the header layout.
+- Removed obsolete plugin cache versions after synchronization while preserving the current version and unrelated official plugin caches.
+- Deleted a Profile's tool-owned managed Home together with the Profile record, while retaining strict path checks that protect external and legacy source directories.
+
 ## 0.2.9 - 2026-07-29
 
 - Preserved refreshed account credentials when launching a managed Profile instead of overwriting them with the originally imported `auth.json`, preventing repeated sign-in prompts.

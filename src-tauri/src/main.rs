@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 #[cfg(windows)]
 use std::os::windows::fs::symlink_file;
@@ -9,7 +9,7 @@ use std::os::windows::process::CommandExt;
 use std::{
     collections::BTreeMap,
     env,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs, io,
     path::{Path, PathBuf},
     process::Command,
@@ -32,6 +32,7 @@ const ALL_PROXY_ENV_KEY: &str = "ALL_PROXY";
 const NO_PROXY_ENV_KEY: &str = "NO_PROXY";
 const LOOPBACK_NO_PROXY: &str = "127.0.0.1,localhost,::1";
 const DATA_FILE_OVERRIDE_ENV_KEY: &str = "CODEX_SWITCH_HELPER_DATA_FILE";
+const RESOURCE_SOURCES_FILENAME: &str = "resource-sources.json";
 const AUTOSTART_REGISTRY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const AUTOSTART_VALUE_NAME: &str = "Codex Switch Helper";
 
@@ -171,10 +172,16 @@ struct ConnectionTestResult {
 #[serde(rename_all = "camelCase")]
 struct SkillInfo {
     name: String,
+    version: Option<String>,
     path: String,
     source: String,
     shared: bool,
     description: Option<String>,
+    managed: bool,
+    source_type: Option<String>,
+    source_label: Option<String>,
+    can_update: bool,
+    updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -182,6 +189,7 @@ struct SkillInfo {
 struct SharedResources {
     agents_path: String,
     agents_content: String,
+    agents_updated_at: Option<String>,
     skills_paths: Vec<String>,
     skills: Vec<SkillInfo>,
 }
@@ -194,6 +202,11 @@ struct SharedPluginInfo {
     path: String,
     synced_profiles: usize,
     total_profiles: usize,
+    managed: bool,
+    source_type: Option<String>,
+    source_label: Option<String>,
+    can_update: bool,
+    updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -217,6 +230,71 @@ struct PluginSyncResult {
 struct PluginManifest {
     name: String,
     version: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum ResourceKind {
+    Skill,
+    Plugin,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum ResourceSourceType {
+    Local,
+    Git,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceSource {
+    kind: ResourceKindValue,
+    name: String,
+    source_type: ResourceSourceType,
+    source: String,
+    #[serde(default)]
+    subpath: Option<String>,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum ResourceKindValue {
+    Skill,
+    Plugin,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceSourceRegistry {
+    #[serde(default)]
+    resources: Vec<ResourceSource>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceOperationResult {
+    succeeded: Vec<String>,
+    skipped: Vec<String>,
+    failed: Vec<String>,
+    profile_errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceUpdateCheck {
+    name: String,
+    update_available: bool,
+    current_version: Option<String>,
+    latest_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AutomaticResourceSyncResult {
+    skills: SkillImportResult,
+    plugins: PluginSyncResult,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -337,7 +415,8 @@ fn create_profile(
         )
         .map_err(format_io_error)?;
     }
-    sync_shared_plugins_to_profile(Path::new(&profile.home_path))?;
+    let managed_home = validated_managed_profile_home(&app, &profile)?;
+    sync_shared_plugins_to_profile(&managed_home)?;
     data.profiles.push(profile.clone());
     if data.active_profile_id.is_none() {
         data.active_profile_id = Some(profile.id.clone());
@@ -424,15 +503,22 @@ fn delete_profile(app: AppHandle, profile_id: String) -> Result<(), String> {
     if data.active_profile_id.as_deref() == Some(&profile.id) {
         data.active_profile_id = data.profiles.first().map(|item| item.id.clone());
     }
-    if profile.managed
-        && managed_profile_home(&app, &profile.id)? == PathBuf::from(&profile.home_path)
-    {
-        let home_path = PathBuf::from(&profile.home_path);
-        if home_path.exists() {
-            fs::remove_dir_all(home_path).map_err(format_io_error)?;
-        }
-    }
+    let expected_home = managed_profile_home(&app, &profile.id)?;
+    let actual_home = PathBuf::from(&profile.home_path);
+    remove_owned_profile_home(profile.managed, &expected_home, &actual_home)?;
     save_data(&app, &data)
+}
+
+fn remove_owned_profile_home(
+    managed: bool,
+    expected_home: &Path,
+    actual_home: &Path,
+) -> Result<bool, String> {
+    if !managed || expected_home != actual_home || !actual_home.exists() {
+        return Ok(false);
+    }
+    fs::remove_dir_all(actual_home).map_err(format_io_error)?;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -567,7 +653,7 @@ fn launch_codex_blocking(app: AppHandle, profile_id: String) -> Result<CodexInst
         .position(|profile| profile.id == profile_id)
         .ok_or_else(|| "Profile 不存在。".to_string())?;
 
-    let home_path = PathBuf::from(&data.profiles[profile_index].home_path);
+    let home_path = validated_managed_profile_home(&app, &data.profiles[profile_index])?;
     fs::create_dir_all(&home_path).map_err(format_io_error)?;
     seed_profile_config_if_missing(&app, &data.profiles[profile_index], &home_path)?;
     if let Some(config_toml) = migrate_home_config_paths(&app, &home_path)? {
@@ -985,7 +1071,8 @@ fn link_agents_file(source: &Path, codex_home: &Path) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn get_shared_resources() -> Result<SharedResources, String> {
+fn get_shared_resources(app: AppHandle) -> Result<SharedResources, String> {
+    let registry = load_resource_registry(&app)?;
     let root = agents_root()?;
     let agents_path = root.join(SHARED_AGENTS_FILENAME);
     let shared_skills_path = root.join("skills");
@@ -996,15 +1083,28 @@ fn get_shared_resources() -> Result<SharedResources, String> {
         String::new()
     };
     let mut skills = Vec::new();
-    collect_skills(&shared_skills_path, "~/.agents", true, &mut skills)?;
+    collect_skills(
+        &shared_skills_path,
+        "~/.agents",
+        true,
+        &registry,
+        &mut skills,
+    )?;
     let mut legacy_skills = Vec::new();
-    collect_skills(&codex_skills_path, "~/.codex", false, &mut legacy_skills)?;
+    collect_skills(
+        &codex_skills_path,
+        "~/.codex",
+        false,
+        &registry,
+        &mut legacy_skills,
+    )?;
     legacy_skills.retain(|legacy| !skills.iter().any(|skill| skill.name == legacy.name));
     skills.extend(legacy_skills);
     skills.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| b.shared.cmp(&a.shared)));
     Ok(SharedResources {
         agents_path: agents_path.to_string_lossy().to_string(),
         agents_content,
+        agents_updated_at: file_modified_at(&agents_path),
         skills_paths: vec![
             shared_skills_path.to_string_lossy().to_string(),
             codex_skills_path.to_string_lossy().to_string(),
@@ -1017,6 +1117,7 @@ fn collect_skills(
     skills_path: &Path,
     source: &str,
     shared: bool,
+    registry: &ResourceSourceRegistry,
     skills: &mut Vec<SkillInfo>,
 ) -> Result<(), String> {
     if skills_path.is_dir() {
@@ -1028,20 +1129,46 @@ fn collect_skills(
                 continue;
             }
             let content = fs::read_to_string(&skill_file).unwrap_or_default();
-            let description = content
-                .lines()
-                .find_map(|line| line.strip_prefix("description:"))
-                .map(|value| value.trim().trim_matches('"').to_string());
+            let description = frontmatter_value(&content, "description");
+            let version = frontmatter_value(&content, "version");
+            let name = entry.file_name().to_string_lossy().to_string();
+            let registration = registry
+                .resources
+                .iter()
+                .find(|item| item.kind == ResourceKindValue::Skill && item.name == name);
             skills.push(SkillInfo {
-                name: entry.file_name().to_string_lossy().to_string(),
+                name,
+                version,
                 path: path.to_string_lossy().to_string(),
                 source: source.to_string(),
                 shared,
                 description,
+                managed: registration.is_some(),
+                source_type: registration.map(|item| source_type_label(item.source_type)),
+                source_label: registration.map(resource_source_label),
+                can_update: registration.is_some(),
+                updated_at: file_modified_at(&skill_file)
+                    .or_else(|| registration.map(|item| item.updated_at.clone())),
             });
         }
     }
     Ok(())
+}
+
+fn frontmatter_value(content: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}:");
+    content
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .map(|value| value.trim().trim_matches(['"', '\'']).to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn file_modified_at(path: &Path) -> Option<String> {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .map(|modified| DateTime::<Utc>::from(modified).to_rfc3339())
 }
 
 #[tauri::command]
@@ -1089,6 +1216,540 @@ fn import_skills(source_root: &Path, target_root: &Path) -> Result<SkillImportRe
         result.imported += 1;
     }
     Ok(result)
+}
+
+fn resource_registry_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app_data_dir(app)?.join(RESOURCE_SOURCES_FILENAME))
+}
+
+fn load_resource_registry(app: &AppHandle) -> Result<ResourceSourceRegistry, String> {
+    let path = resource_registry_path(app)?;
+    if !path.is_file() {
+        return Ok(ResourceSourceRegistry::default());
+    }
+    let content = fs::read_to_string(&path).map_err(format_io_error)?;
+    serde_json::from_str(&content)
+        .map_err(|error| format!("资源来源注册表解析失败（{}）：{error}", path.display()))
+}
+
+fn save_resource_registry(
+    app: &AppHandle,
+    registry: &ResourceSourceRegistry,
+) -> Result<(), String> {
+    let path = resource_registry_path(app)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(format_io_error)?;
+    }
+    let temporary = path.with_extension(format!("json.{}.tmp", Uuid::new_v4()));
+    let content = serde_json::to_string_pretty(registry)
+        .map_err(|error| format!("资源来源注册表序列化失败：{error}"))?;
+    fs::write(&temporary, format!("{content}\n")).map_err(format_io_error)?;
+    let backup = path.with_extension(format!("json.{}.backup", Uuid::new_v4()));
+    if path.exists() {
+        fs::rename(&path, &backup).map_err(format_io_error)?;
+    }
+    if let Err(error) = fs::rename(&temporary, &path) {
+        if backup.exists() {
+            let _ = fs::rename(&backup, &path);
+        }
+        let _ = fs::remove_file(&temporary);
+        return Err(format_io_error(error));
+    }
+    if backup.exists() {
+        fs::remove_file(backup).map_err(format_io_error)?;
+    }
+    Ok(())
+}
+
+fn source_type_label(source_type: ResourceSourceType) -> String {
+    match source_type {
+        ResourceSourceType::Local => "local",
+        ResourceSourceType::Git => "git",
+    }
+    .to_string()
+}
+
+fn resource_source_label(source: &ResourceSource) -> String {
+    match source.subpath.as_deref() {
+        Some(subpath) if !subpath.is_empty() => format!("{} · {subpath}", source.source),
+        _ => source.source.clone(),
+    }
+}
+
+fn validate_resource_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || name.starts_with('.')
+        || !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character))
+    {
+        return Err(format!("资源名称不合法：{name}"));
+    }
+    Ok(())
+}
+
+fn validate_plugin_manifest_location(
+    manifest: &PluginManifest,
+    plugin_root: &Path,
+    version_root: &Path,
+) -> Result<(), String> {
+    validate_resource_name(&manifest.name)?;
+    validate_resource_name(&manifest.version)?;
+    if plugin_root.file_name() != Some(OsStr::new(&manifest.name))
+        || version_root.file_name() != Some(OsStr::new(&manifest.version))
+    {
+        return Err(format!(
+            "插件清单与缓存目录不一致：{} {}",
+            manifest.name, manifest.version
+        ));
+    }
+    Ok(())
+}
+
+fn skill_manifest_name(skill_root: &Path) -> Result<String, String> {
+    let path = skill_root.join("SKILL.md");
+    let content = fs::read_to_string(&path).map_err(format_io_error)?;
+    let name = content
+        .lines()
+        .find_map(|line| line.strip_prefix("name:"))
+        .map(|value| value.trim().trim_matches(['"', '\'']).to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("Skill 清单缺少 name 字段：{}", path.display()))?;
+    validate_resource_name(&name)?;
+    Ok(name)
+}
+
+fn validated_subpath(value: Option<String>) -> Result<Option<PathBuf>, String> {
+    let Some(value) = value.map(|item| item.trim().to_string()) else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let path = PathBuf::from(&value);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err("仓库子目录必须是不能包含 .. 的相对路径。".to_string());
+    }
+    Ok(Some(path))
+}
+
+fn prepare_resource_source(
+    source_type: ResourceSourceType,
+    source: &str,
+    subpath: Option<String>,
+) -> Result<(PathBuf, Option<PathBuf>), String> {
+    let subpath = validated_subpath(subpath)?;
+    match source_type {
+        ResourceSourceType::Local => {
+            let root = PathBuf::from(source);
+            if !root.is_dir() {
+                return Err(format!("本地目录不存在：{}", root.display()));
+            }
+            let selected = subpath.as_ref().map(|path| root.join(path)).unwrap_or(root);
+            if !selected.is_dir() {
+                return Err(format!("资源子目录不存在：{}", selected.display()));
+            }
+            Ok((selected, None))
+        }
+        ResourceSourceType::Git => {
+            if !(source.starts_with("https://") || source.starts_with("http://")) {
+                return Err("Git 来源必须使用 http:// 或 https:// URL。".to_string());
+            }
+            let temporary = env::temp_dir().join(format!("codex-resource-{}", Uuid::new_v4()));
+            let output = hidden_command("git")
+                .args(["clone", "--depth", "1", source])
+                .arg(&temporary)
+                .output()
+                .map_err(|error| format!("无法运行 git：{error}"))?;
+            if !output.status.success() {
+                let _ = fs::remove_dir_all(&temporary);
+                return Err(format!(
+                    "Git 下载失败：{}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+            let selected = subpath
+                .as_ref()
+                .map(|path| temporary.join(path))
+                .unwrap_or_else(|| temporary.clone());
+            if !selected.is_dir() {
+                let _ = fs::remove_dir_all(&temporary);
+                return Err(format!("仓库内资源子目录不存在：{}", selected.display()));
+            }
+            Ok((selected, Some(temporary)))
+        }
+    }
+}
+
+fn replace_directory(source: &Path, target: &Path) -> Result<(), String> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| "资源目标目录无效。".to_string())?;
+    fs::create_dir_all(parent).map_err(format_io_error)?;
+    let leaf = target
+        .file_name()
+        .ok_or_else(|| "资源目标名称无效。".to_string())?
+        .to_string_lossy();
+    let staging = parent.join(format!(".{leaf}.stage-{}", Uuid::new_v4()));
+    let backup = parent.join(format!(".{leaf}.backup-{}", Uuid::new_v4()));
+    copy_dir_recursive(source, &staging).map_err(format_io_error)?;
+    if target.exists() {
+        if let Err(error) = fs::rename(target, &backup) {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(format_io_error(error));
+        }
+    }
+    if let Err(error) = fs::rename(&staging, target) {
+        if backup.exists() {
+            let _ = fs::rename(&backup, target);
+        }
+        let _ = fs::remove_dir_all(&staging);
+        return Err(format_io_error(error));
+    }
+    if backup.exists() {
+        fs::remove_dir_all(&backup).map_err(format_io_error)?;
+    }
+    Ok(())
+}
+
+fn sync_plugins_after_change(app: &AppHandle) -> Result<Vec<String>, String> {
+    let data = load_data(app)?;
+    let plugins = collect_shared_plugins()?;
+    write_shared_marketplace(&plugins)?;
+    let mut errors = Vec::new();
+    for profile in data.profiles.iter().filter(|profile| profile.managed) {
+        let operation = validated_managed_profile_home(app, profile)
+            .and_then(|home| sync_shared_plugins_to_profile(&home));
+        if let Err(error) = operation {
+            errors.push(format!("{}：{error}", profile.name));
+        }
+    }
+    Ok(errors)
+}
+
+fn kind_value(kind: ResourceKind) -> ResourceKindValue {
+    match kind {
+        ResourceKind::Skill => ResourceKindValue::Skill,
+        ResourceKind::Plugin => ResourceKindValue::Plugin,
+    }
+}
+
+fn install_resource_from_registration(
+    app: &AppHandle,
+    kind: ResourceKind,
+    source_type: ResourceSourceType,
+    source: String,
+    subpath: Option<String>,
+    expected_name: Option<&str>,
+) -> Result<(String, Vec<String>), String> {
+    let normalized_subpath =
+        validated_subpath(subpath.clone())?.map(|path| path.to_string_lossy().replace('\\', "/"));
+    let (selected, cleanup) =
+        prepare_resource_source(source_type, &source, normalized_subpath.clone())?;
+    let result = (|| {
+        let (name, target) = match kind {
+            ResourceKind::Skill => {
+                if !selected.join("SKILL.md").is_file() {
+                    return Err("Skill 根目录缺少 SKILL.md。".to_string());
+                }
+                let name = skill_manifest_name(&selected)?;
+                (name.clone(), agents_root()?.join("skills").join(name))
+            }
+            ResourceKind::Plugin => {
+                let manifest = plugin_manifest(&selected)?;
+                validate_resource_name(&manifest.name)?;
+                validate_resource_name(&manifest.version)?;
+                (
+                    manifest.name.clone(),
+                    shared_plugins_root()?
+                        .join(&manifest.name)
+                        .join(&manifest.version),
+                )
+            }
+        };
+        if expected_name.is_some_and(|expected| expected != name) {
+            return Err(format!(
+                "更新后的资源名称已改变：期望 {}，实际 {name}",
+                expected_name.unwrap_or_default()
+            ));
+        }
+        replace_directory(&selected, &target)?;
+        if kind == ResourceKind::Plugin {
+            let plugin_root = shared_plugins_root()?.join(&name);
+            for entry in fs::read_dir(&plugin_root).map_err(format_io_error)? {
+                let entry = entry.map_err(format_io_error)?;
+                if entry.path().is_dir() && entry.path() != target {
+                    fs::remove_dir_all(entry.path()).map_err(format_io_error)?;
+                }
+            }
+        }
+        let now = Utc::now().to_rfc3339();
+        let mut registry = load_resource_registry(app)?;
+        registry
+            .resources
+            .retain(|item| !(item.kind == kind_value(kind) && item.name == name));
+        registry.resources.push(ResourceSource {
+            kind: kind_value(kind),
+            name: name.clone(),
+            source_type,
+            source,
+            subpath: normalized_subpath,
+            updated_at: now,
+        });
+        save_resource_registry(app, &registry)?;
+        let profile_errors = if kind == ResourceKind::Plugin {
+            sync_plugins_after_change(app)?
+        } else {
+            Vec::new()
+        };
+        Ok((name, profile_errors))
+    })();
+    if let Some(path) = cleanup {
+        let _ = fs::remove_dir_all(path);
+    }
+    result
+}
+
+#[tauri::command]
+fn install_resource(
+    app: AppHandle,
+    kind: ResourceKind,
+    source_type: ResourceSourceType,
+    source: String,
+    subpath: Option<String>,
+) -> Result<ResourceOperationResult, String> {
+    let (name, profile_errors) =
+        install_resource_from_registration(&app, kind, source_type, source, subpath, None)?;
+    Ok(ResourceOperationResult {
+        succeeded: vec![name],
+        profile_errors,
+        ..Default::default()
+    })
+}
+
+#[tauri::command]
+fn update_resource(
+    app: AppHandle,
+    kind: ResourceKind,
+    name: String,
+) -> Result<ResourceOperationResult, String> {
+    let registry = load_resource_registry(&app)?;
+    let registration = registry
+        .resources
+        .iter()
+        .find(|item| item.kind == kind_value(kind) && item.name == name)
+        .cloned()
+        .ok_or_else(|| format!("{name} 没有可用的来源记录，无法更新。"))?;
+    let (_, profile_errors) = install_resource_from_registration(
+        &app,
+        kind,
+        registration.source_type,
+        registration.source,
+        registration.subpath,
+        Some(&name),
+    )?;
+    Ok(ResourceOperationResult {
+        succeeded: vec![name],
+        profile_errors,
+        ..Default::default()
+    })
+}
+
+#[tauri::command]
+fn check_resource_update(
+    app: AppHandle,
+    kind: ResourceKind,
+    name: String,
+) -> Result<ResourceUpdateCheck, String> {
+    let registry = load_resource_registry(&app)?;
+    let registration = registry
+        .resources
+        .iter()
+        .find(|item| item.kind == kind_value(kind) && item.name == name)
+        .cloned()
+        .ok_or_else(|| format!("{name} 没有可用的来源记录，无法检查更新。"))?;
+    let normalized_subpath = validated_subpath(registration.subpath.clone())?
+        .map(|path| path.to_string_lossy().replace('\\', "/"));
+    let (selected, cleanup) = prepare_resource_source(
+        registration.source_type,
+        &registration.source,
+        normalized_subpath,
+    )?;
+    let result = (|| {
+        let (candidate_name, current_path, current_version, latest_version) = match kind {
+            ResourceKind::Skill => {
+                if !selected.join("SKILL.md").is_file() {
+                    return Err("Skill 根目录缺少 SKILL.md。".to_string());
+                }
+                let candidate_name = skill_manifest_name(&selected)?;
+                let latest_version = fs::read_to_string(selected.join("SKILL.md"))
+                    .ok()
+                    .and_then(|content| frontmatter_value(&content, "version"));
+                let current_path = agents_root()?.join("skills").join(&name);
+                let current_version = fs::read_to_string(current_path.join("SKILL.md"))
+                    .ok()
+                    .and_then(|content| frontmatter_value(&content, "version"));
+                (
+                    candidate_name,
+                    current_path,
+                    current_version,
+                    latest_version,
+                )
+            }
+            ResourceKind::Plugin => {
+                let candidate = plugin_manifest(&selected)?;
+                let current = collect_shared_plugins()?
+                    .into_iter()
+                    .find(|(manifest, _)| manifest.name == name)
+                    .ok_or_else(|| format!("共享插件不存在：{name}"))?;
+                (
+                    candidate.name,
+                    current.1,
+                    Some(current.0.version),
+                    Some(candidate.version),
+                )
+            }
+        };
+        if candidate_name != name {
+            return Err(format!(
+                "来源中的资源名称已改变：期望 {name}，实际 {candidate_name}"
+            ));
+        }
+        let update_available = !current_path.is_dir()
+            || !directories_equal(&selected, &current_path).map_err(format_io_error)?;
+        Ok(ResourceUpdateCheck {
+            name,
+            update_available,
+            current_version,
+            latest_version,
+        })
+    })();
+    if let Some(path) = cleanup {
+        let _ = fs::remove_dir_all(path);
+    }
+    result
+}
+
+#[tauri::command]
+fn update_all_resources(
+    app: AppHandle,
+    kind: ResourceKind,
+) -> Result<ResourceOperationResult, String> {
+    let registrations = load_resource_registry(&app)?
+        .resources
+        .into_iter()
+        .filter(|item| item.kind == kind_value(kind))
+        .collect::<Vec<_>>();
+    let mut result = ResourceOperationResult::default();
+    for registration in registrations {
+        match install_resource_from_registration(
+            &app,
+            kind,
+            registration.source_type,
+            registration.source,
+            registration.subpath,
+            Some(&registration.name),
+        ) {
+            Ok((name, profile_errors)) => {
+                result.succeeded.push(name);
+                result.profile_errors.extend(profile_errors);
+            }
+            Err(error) => result
+                .failed
+                .push(format!("{}：{error}", registration.name)),
+        }
+    }
+    if result.succeeded.is_empty() && result.failed.is_empty() {
+        result.skipped.push("没有记录来源的可更新资源".to_string());
+    }
+    Ok(result)
+}
+
+fn remove_toml_section(content: &str, header: &str) -> String {
+    let lines = content.lines().collect::<Vec<_>>();
+    let Some(start) = lines.iter().position(|line| line.trim() == header) else {
+        return content.to_string();
+    };
+    let end = lines
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find(|(_, line)| line.trim_start().starts_with('['))
+        .map(|(index, _)| index)
+        .unwrap_or(lines.len());
+    let mut output = Vec::new();
+    output.extend_from_slice(&lines[..start]);
+    output.extend_from_slice(&lines[end..]);
+    format!("{}\n", output.join("\n").trim_end())
+}
+
+#[tauri::command]
+fn delete_resource(
+    app: AppHandle,
+    kind: ResourceKind,
+    name: String,
+) -> Result<ResourceOperationResult, String> {
+    validate_resource_name(&name)?;
+    let mut profile_errors = Vec::new();
+    match kind {
+        ResourceKind::Skill => {
+            let target = agents_root()?.join("skills").join(&name);
+            if !target.join("SKILL.md").is_file() {
+                return Err(format!("共享 Skill 不存在：{name}"));
+            }
+            fs::remove_dir_all(target).map_err(format_io_error)?;
+        }
+        ResourceKind::Plugin => {
+            let target = shared_plugins_root()?.join(&name);
+            if !target.is_dir() {
+                return Err(format!("共享插件不存在：{name}"));
+            }
+            fs::remove_dir_all(target).map_err(format_io_error)?;
+            let data = load_data(&app)?;
+            for profile in data.profiles.iter().filter(|profile| profile.managed) {
+                let home = validated_managed_profile_home(&app, profile)?;
+                let cache = home
+                    .join("plugins")
+                    .join("cache")
+                    .join(SHARED_PLUGIN_MARKETPLACE)
+                    .join(&name);
+                let operation = (|| -> Result<(), String> {
+                    if cache.exists() {
+                        fs::remove_dir_all(cache).map_err(format_io_error)?;
+                    }
+                    let config_path = home.join(CODEX_CONFIG_FILENAME);
+                    if config_path.is_file() {
+                        let content = fs::read_to_string(&config_path).map_err(format_io_error)?;
+                        let next = remove_toml_section(
+                            &content,
+                            &format!("[plugins.\"{name}@{SHARED_PLUGIN_MARKETPLACE}\"]"),
+                        );
+                        fs::write(config_path, next).map_err(format_io_error)?;
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = operation {
+                    profile_errors.push(format!("{}：{error}", profile.name));
+                }
+            }
+            remove_shared_marketplace_entry(&name)?;
+            write_shared_marketplace(&collect_shared_plugins()?)?;
+        }
+    }
+    let mut registry = load_resource_registry(&app)?;
+    registry
+        .resources
+        .retain(|item| !(item.kind == kind_value(kind) && item.name == name));
+    save_resource_registry(&app, &registry)?;
+    Ok(ResourceOperationResult {
+        succeeded: vec![name],
+        profile_errors,
+        ..Default::default()
+    })
 }
 
 fn shared_plugins_root() -> Result<PathBuf, String> {
@@ -1166,6 +1827,15 @@ fn collect_shared_plugins() -> Result<Vec<(PluginManifest, PathBuf)>, String> {
                 Ok(manifest) => manifest,
                 Err(_) => continue,
             };
+            if validate_plugin_manifest_location(
+                &manifest,
+                &plugin_entry.path(),
+                &version_entry.path(),
+            )
+            .is_err()
+            {
+                continue;
+            }
             let replace = selected
                 .get(&manifest.name)
                 .map(|(current, _)| {
@@ -1233,6 +1903,29 @@ fn write_shared_marketplace(plugins: &[(PluginManifest, PathBuf)]) -> Result<(),
     fs::write(path, format!("{content}\n")).map_err(format_io_error)
 }
 
+fn remove_shared_marketplace_entry(plugin_name: &str) -> Result<(), String> {
+    let path = shared_plugins_root()?.join("marketplace.json");
+    if !path.is_file() {
+        return Ok(());
+    }
+    let content = fs::read_to_string(&path).map_err(format_io_error)?;
+    let mut document = serde_json::from_str::<serde_json::Value>(&content)
+        .map_err(|error| format!("Marketplace 解析失败（{}）：{error}", path.display()))?;
+    let entries = document
+        .get_mut("plugins")
+        .and_then(|value| value.as_array_mut())
+        .ok_or_else(|| "Marketplace plugins 必须是数组。".to_string())?;
+    entries.retain(|entry| {
+        entry
+            .get("name")
+            .and_then(|value| value.as_str())
+            .is_none_or(|name| name != plugin_name)
+    });
+    let content = serde_json::to_string_pretty(&document)
+        .map_err(|error| format!("Marketplace 序列化失败：{error}"))?;
+    fs::write(path, format!("{content}\n")).map_err(format_io_error)
+}
+
 fn upsert_toml_section(content: &str, header: &str, body: &[String]) -> String {
     let lines = content.lines().collect::<Vec<_>>();
     let start = lines.iter().position(|line| line.trim() == header);
@@ -1281,6 +1974,24 @@ fn disable_old_plugin_entries(content: &str, plugin_name: &str) -> String {
     format!("{}\n", lines.join("\n"))
 }
 
+fn remove_obsolete_plugin_versions(
+    plugin_cache_root: &Path,
+    current_version: &str,
+) -> io::Result<usize> {
+    if !plugin_cache_root.is_dir() {
+        return Ok(0);
+    }
+    let mut removed = 0;
+    for entry in fs::read_dir(plugin_cache_root)? {
+        let entry = entry?;
+        if entry.path().is_dir() && entry.file_name().to_string_lossy() != current_version {
+            fs::remove_dir_all(entry.path())?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 fn sync_shared_plugins_to_profile(home: &Path) -> Result<(usize, usize), String> {
     let plugins = collect_shared_plugins()?;
     if plugins.is_empty() {
@@ -1294,7 +2005,10 @@ fn sync_shared_plugins_to_profile(home: &Path) -> Result<(usize, usize), String>
     let mut copied = 0;
     let mut skipped = 0;
     for (manifest, source) in &plugins {
-        let target = cache_root.join(&manifest.name).join(&manifest.version);
+        let plugin_cache_root = cache_root.join(&manifest.name);
+        remove_obsolete_plugin_versions(&plugin_cache_root, &manifest.version)
+            .map_err(format_io_error)?;
+        let target = plugin_cache_root.join(&manifest.version);
         if target.is_dir() && directories_equal(source, &target).map_err(format_io_error)? {
             skipped += 1;
         } else {
@@ -1352,6 +2066,7 @@ fn sync_shared_plugins_to_profile(home: &Path) -> Result<(usize, usize), String>
 #[tauri::command]
 fn get_shared_plugins(app: AppHandle) -> Result<SharedPlugins, String> {
     let data = load_data(&app)?;
+    let registry = load_resource_registry(&app)?;
     let profiles = data
         .profiles
         .iter()
@@ -1360,6 +2075,10 @@ fn get_shared_plugins(app: AppHandle) -> Result<SharedPlugins, String> {
     let plugins = collect_shared_plugins()?
         .into_iter()
         .map(|(manifest, path)| {
+            let registration = registry
+                .resources
+                .iter()
+                .find(|item| item.kind == ResourceKindValue::Plugin && item.name == manifest.name);
             let synced_profiles = profiles
                 .iter()
                 .filter(|profile| {
@@ -1378,6 +2097,12 @@ fn get_shared_plugins(app: AppHandle) -> Result<SharedPlugins, String> {
                 path: path.to_string_lossy().to_string(),
                 synced_profiles,
                 total_profiles: profiles.len(),
+                managed: registration.is_some(),
+                source_type: registration.map(|item| source_type_label(item.source_type)),
+                source_label: registration.map(resource_source_label),
+                can_update: registration.is_some(),
+                updated_at: file_modified_at(&path)
+                    .or_else(|| registration.map(|item| item.updated_at.clone())),
             }
         })
         .collect();
@@ -1397,7 +2122,8 @@ fn import_profile_plugins(app: AppHandle) -> Result<PluginSyncResult, String> {
     fs::create_dir_all(&shared_root).map_err(format_io_error)?;
     let mut result = PluginSyncResult::default();
     for profile in data.profiles.iter().filter(|profile| profile.managed) {
-        let cache_root = Path::new(&profile.home_path).join("plugins").join("cache");
+        let home = validated_managed_profile_home(&app, profile)?;
+        let cache_root = home.join("plugins").join("cache");
         if !cache_root.is_dir() {
             continue;
         }
@@ -1427,6 +2153,16 @@ fn import_profile_plugins(app: AppHandle) -> Result<PluginSyncResult, String> {
                             continue;
                         }
                     };
+                    if validate_plugin_manifest_location(
+                        &manifest,
+                        &plugin_entry.path(),
+                        &version_entry.path(),
+                    )
+                    .is_err()
+                    {
+                        result.skipped += 1;
+                        continue;
+                    }
                     let target = shared_root.join(&manifest.name).join(&manifest.version);
                     if target.is_dir() {
                         if directories_equal(&version_entry.path(), &target)
@@ -1460,7 +2196,9 @@ fn import_profile_plugins(app: AppHandle) -> Result<PluginSyncResult, String> {
     let plugins = collect_shared_plugins()?;
     write_shared_marketplace(&plugins)?;
     for profile in data.profiles.iter().filter(|profile| profile.managed) {
-        match sync_shared_plugins_to_profile(Path::new(&profile.home_path)) {
+        let operation = validated_managed_profile_home(&app, profile)
+            .and_then(|home| sync_shared_plugins_to_profile(&home));
+        match operation {
             Ok((updated, skipped)) => {
                 result.updated += updated;
                 result.skipped += skipped;
@@ -1480,7 +2218,9 @@ fn sync_shared_plugins(app: AppHandle) -> Result<PluginSyncResult, String> {
     write_shared_marketplace(&plugins)?;
     let mut result = PluginSyncResult::default();
     for profile in data.profiles.iter().filter(|profile| profile.managed) {
-        match sync_shared_plugins_to_profile(Path::new(&profile.home_path)) {
+        let operation = validated_managed_profile_home(&app, profile)
+            .and_then(|home| sync_shared_plugins_to_profile(&home));
+        match operation {
             Ok((updated, skipped)) => {
                 result.updated += updated;
                 result.skipped += skipped;
@@ -1491,6 +2231,13 @@ fn sync_shared_plugins(app: AppHandle) -> Result<PluginSyncResult, String> {
         }
     }
     Ok(result)
+}
+
+#[tauri::command]
+fn auto_sync_resources(app: AppHandle) -> Result<AutomaticResourceSyncResult, String> {
+    let skills = import_codex_skills()?;
+    let plugins = import_profile_plugins(app)?;
+    Ok(AutomaticResourceSyncResult { skills, plugins })
 }
 
 #[tauri::command]
@@ -1671,10 +2418,27 @@ fn initialize_new_profile_auth_files(profile: &Profile, codex_home: &Path) -> Re
 }
 
 fn managed_profile_home(app: &AppHandle, profile_id: &str) -> Result<PathBuf, String> {
+    validate_resource_name(profile_id)?;
     Ok(app_data_dir(app)?
         .join("profiles")
         .join(profile_id)
         .join("home"))
+}
+
+fn validated_managed_profile_home(app: &AppHandle, profile: &Profile) -> Result<PathBuf, String> {
+    if !profile.managed {
+        return Err(format!("Profile“{}”不是工具托管 Profile。", profile.name));
+    }
+    let expected = managed_profile_home(app, &profile.id)?;
+    let actual = PathBuf::from(&profile.home_path);
+    if actual != expected {
+        return Err(format!(
+            "Profile“{}”的 Home 不属于本工具：{}",
+            profile.name,
+            actual.display()
+        ));
+    }
+    Ok(expected)
 }
 
 fn validate_auth(auth_mode: &AuthMode, api_key: Option<&str>) -> Result<(), String> {
@@ -2033,6 +2797,7 @@ fn load_data(app: &AppHandle) -> Result<StoredData, String> {
     let mut migrated = false;
     for profile in &mut data.profiles {
         if profile.environment_mode == EnvironmentMode::Sandbox && profile.managed {
+            validated_managed_profile_home(app, profile)?;
             continue;
         }
         let source = PathBuf::from(&profile.home_path);
@@ -2294,6 +3059,60 @@ enabled = true
         )
         .unwrap();
         assert!(!directories_equal(&left, &right).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn plugin_cache_cleanup_removes_only_obsolete_versions() {
+        let root = env::temp_dir().join(format!("codex-plugin-cache-test-{}", Uuid::new_v4()));
+        let plugin_root = root.join("browser-automation");
+        fs::create_dir_all(plugin_root.join("0.0.2")).unwrap();
+        fs::create_dir_all(plugin_root.join("0.0.3")).unwrap();
+        fs::create_dir_all(plugin_root.join("0.0.4")).unwrap();
+        let readonly_cache_file = plugin_root.join("0.0.2").join("pack.idx");
+        fs::write(&readonly_cache_file, "readonly cache").unwrap();
+        let mut permissions = fs::metadata(&readonly_cache_file).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&readonly_cache_file, permissions).unwrap();
+        fs::write(plugin_root.join("0.0.4").join("current.txt"), "current").unwrap();
+
+        let removed = remove_obsolete_plugin_versions(&plugin_root, "0.0.4").unwrap();
+
+        assert_eq!(removed, 2);
+        assert!(!plugin_root.join("0.0.2").exists());
+        assert!(!plugin_root.join("0.0.3").exists());
+        assert_eq!(
+            fs::read_to_string(plugin_root.join("0.0.4").join("current.txt")).unwrap(),
+            "current"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_profile_home_removal_is_exact_and_scoped() {
+        let root = env::temp_dir().join(format!("codex-profile-delete-test-{}", Uuid::new_v4()));
+        let owned_home = root.join("profiles").join("owned").join("home");
+        let unrelated_home = root.join("profiles").join("other").join("home");
+        fs::create_dir_all(&owned_home).unwrap();
+        fs::create_dir_all(&unrelated_home).unwrap();
+        let owned_file = owned_home.join("owned.txt");
+        fs::write(&owned_file, "owned").unwrap();
+        let mut permissions = fs::metadata(&owned_file).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&owned_file, permissions).unwrap();
+        fs::write(unrelated_home.join("keep.txt"), "keep").unwrap();
+
+        assert!(!remove_owned_profile_home(false, &owned_home, &owned_home).unwrap());
+        assert!(!remove_owned_profile_home(true, &owned_home, &unrelated_home).unwrap());
+        assert!(owned_home.exists());
+        assert!(unrelated_home.exists());
+
+        assert!(remove_owned_profile_home(true, &owned_home, &owned_home).unwrap());
+        assert!(!owned_home.exists());
+        assert_eq!(
+            fs::read_to_string(unrelated_home.join("keep.txt")).unwrap(),
+            "keep"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2582,6 +3401,111 @@ enabled = true
         assert!(!home.join("auth.json").exists());
         fs::remove_dir(&home).unwrap();
     }
+
+    #[test]
+    fn resource_subpaths_reject_escape_and_absolute_paths() {
+        assert!(validated_subpath(Some("skills/example".to_string())).is_ok());
+        assert!(validated_subpath(Some("../outside".to_string())).is_err());
+        assert!(validated_subpath(Some(r"C:\outside".to_string())).is_err());
+    }
+
+    #[test]
+    fn resource_names_reject_hidden_and_path_like_values() {
+        assert!(validate_resource_name("browser-automation").is_ok());
+        assert!(validate_resource_name(".system").is_err());
+        assert!(validate_resource_name("../skill").is_err());
+        assert!(validate_resource_name("skill/name").is_err());
+    }
+
+    #[test]
+    fn plugin_manifests_cannot_escape_or_mismatch_cache_directories() {
+        let valid = PluginManifest {
+            name: "browser-automation".to_string(),
+            version: "0.0.4".to_string(),
+        };
+        assert!(validate_plugin_manifest_location(
+            &valid,
+            Path::new("browser-automation"),
+            Path::new("0.0.4")
+        )
+        .is_ok());
+
+        let escaping = PluginManifest {
+            name: "../outside".to_string(),
+            version: "0.0.4".to_string(),
+        };
+        assert!(validate_plugin_manifest_location(
+            &escaping,
+            Path::new("browser-automation"),
+            Path::new("0.0.4")
+        )
+        .is_err());
+
+        let mismatched = PluginManifest {
+            name: "different-plugin".to_string(),
+            version: "0.0.4".to_string(),
+        };
+        assert!(validate_plugin_manifest_location(
+            &mismatched,
+            Path::new("browser-automation"),
+            Path::new("0.0.4")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn skill_frontmatter_exposes_declared_version_and_description() {
+        let content = "---\nname: example\nversion: '1.2.3'\ndescription: \"Example skill\"\n---\n";
+
+        assert_eq!(
+            frontmatter_value(content, "version").as_deref(),
+            Some("1.2.3")
+        );
+        assert_eq!(
+            frontmatter_value(content, "description").as_deref(),
+            Some("Example skill")
+        );
+    }
+
+    #[test]
+    fn plugin_config_removal_preserves_unrelated_sections() {
+        let config = concat!(
+            "model = \"gpt-5.5\"\n",
+            "[plugins.\"browser@agents-shared\"]\n",
+            "enabled = true\n",
+            "[plugins.\"other@openai-curated\"]\n",
+            "enabled = true\n"
+        );
+
+        let updated = remove_toml_section(config, "[plugins.\"browser@agents-shared\"]");
+
+        assert!(!updated.contains("browser@agents-shared"));
+        assert!(updated.contains("other@openai-curated"));
+        assert!(updated.contains("model = \"gpt-5.5\""));
+    }
+
+    #[test]
+    fn directory_replacement_keeps_complete_new_content() {
+        let root = env::temp_dir().join(format!("codex-resource-test-{}", Uuid::new_v4()));
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        fs::write(source.join("SKILL.md"), "new").unwrap();
+        fs::write(target.join("SKILL.md"), "old").unwrap();
+        fs::write(target.join("removed.txt"), "old").unwrap();
+
+        replace_directory(&source, &target).unwrap();
+
+        assert_eq!(fs::read_to_string(target.join("SKILL.md")).unwrap(), "new");
+        assert!(!target.join("removed.txt").exists());
+        assert!(!root.read_dir().unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".backup-")));
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 fn main() {
@@ -2650,6 +3574,12 @@ fn main() {
             import_codex_skills,
             import_profile_plugins,
             sync_shared_plugins,
+            install_resource,
+            update_resource,
+            check_resource_update,
+            update_all_resources,
+            delete_resource,
+            auto_sync_resources,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

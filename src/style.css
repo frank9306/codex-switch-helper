@@ -1069,12 +1069,18 @@ code {
 .resource-workspace-toolbar {
   border-bottom: 1px solid var(--line);
   margin: -2px 0 18px;
+  min-height: 58px;
   padding-bottom: 14px;
 }
 
 .resource-tabs {
-  grid-template-columns: repeat(2, minmax(140px, 1fr));
-  width: min(360px, 100%);
+  grid-template-columns: repeat(3, minmax(130px, 1fr));
+  width: min(540px, 100%);
+}
+
+.resource-tabs button {
+  min-width: 0;
+  white-space: nowrap;
 }
 
 .tab-count {
@@ -1091,6 +1097,7 @@ code {
 
 .resource-view-heading {
   align-items: flex-start;
+  min-height: 104px;
 }
 
 .resource-title-line {
@@ -1116,11 +1123,17 @@ code {
 
 .skills-view-heading {
   align-items: flex-start;
+  min-height: 104px;
 }
 
 .skills-view-actions input {
   min-width: 240px;
   padding-block: 9px;
+}
+
+.skills-view-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .skill-source-paths {
@@ -1363,8 +1376,49 @@ button.notice-close:hover:not(:disabled) {
   align-items: start;
   display: grid;
   gap: 16px;
-  grid-template-columns: minmax(150px, 0.32fr) minmax(0, 1fr);
+  grid-template-columns: minmax(150px, 0.32fr) minmax(0, 1fr) auto;
   padding: 14px;
+}
+
+.resource-row-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.resource-origin {
+  color: var(--muted);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.resource-updated-time {
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.resource-version {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  padding: 3px 7px;
+}
+
+.resource-install-dialog label {
+  color: var(--text-secondary);
+  display: grid;
+  font-size: 12px;
+  font-weight: 800;
+  gap: 7px;
+}
+
+.confirm-heading {
+  align-items: center;
+  display: flex;
+  gap: 12px;
 }
 
 .skill-list-row + .skill-list-row {
@@ -1593,6 +1647,8 @@ button.notice-close:hover:not(:disabled) {
     flex-direction: column;
   }
   .resource-tabs { width: 100%; }
+  .resource-view-heading,
+  .skills-view-heading { min-height: 0; }
   .skills-view-actions input { min-width: 0; }
   .skill-list-row { grid-template-columns: 1fr; }
   .confirm-backdrop { padding: 12px; }

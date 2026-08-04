@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "id": "resource-management-ui",
+  "objective": "Make the shared AGENTS.md, Skills, and Plugins workspace stable, informative, update-aware, deletable, and automatically synchronized.",
+  "acceptanceCriteria": [
+    {
+      "id": "tabs",
+      "description": "AGENTS.md, Skills, and Plugins tabs remain on one row and switching panels does not shift the workspace geometry.",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "agents-time",
+      "description": "The AGENTS.md panel displays the file last-modified time from disk.",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "skill-metadata",
+      "description": "Every Skill row displays declared version when available, last-modified time, check-for-update behavior for managed sources, and deletion for shared Skills.",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "plugin-metadata",
+      "description": "Every shared Plugin row displays version, last-modified time, check-for-update behavior for managed sources, and deletion.",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "auto-sync",
+      "description": "At application startup and disk refresh, missing default-home Skills are imported non-destructively and shared Plugins are collected and synchronized to every managed Profile without requiring manual import/sync buttons.",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "verification",
+      "description": "Rust regression tests, frontend build, formatting check, Rust check, and rendered desktop UI verification pass.",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    }
+  ],
+  "constraints": [
+    "Preserve unrelated uncommitted work and the existing visual language.",
+    "Skill import must never overwrite an existing same-name shared Skill.",
+    "Plugin synchronization may mutate only shared plugin storage and tool-owned managed Profile homes."
+  ],
+  "nonGoals": [
+    "Manage OpenAI bundled or official Marketplace plugins.",
+    "Add a dependency or redesign the application shell."
+  ],
+  "requiredDeliverables": [
+    {
+      "id": "backend",
+      "path": "src-tauri/src/main.rs"
+    },
+    {
+      "id": "frontend",
+      "path": "src/main.tsx"
+    },
+    {
+      "id": "styles",
+      "path": "src/style.css"
+    }
+  ],
+  "risk": {
+    "level": "MEDIUM",
+    "reasons": [
+      "Automatic startup synchronization writes shared resource state and managed Profile plugin caches/configuration."
+    ]
+  },
+  "escalateWhen": [
+    "Automatic synchronization requires touching unmanaged Profile homes, official plugins, or overwriting same-name Skills."
+  ],
+  "requiredApprovals": [
+    "Automatically import missing default-home Skills and synchronize third-party shared Plugins at startup and disk refresh."
+  ],
+  "createdAt": "2026-08-04T02:07:31.400331+00:00",
+  "revisions": []
+}

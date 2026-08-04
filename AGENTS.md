@@ -42,3 +42,59 @@
 - Before any release or publish, update `README.md` and `README.zh-CN.md` for changed usage, setup, and release notes.
 - Verify before release: `npm run build`, `cargo fmt --check`, and `cargo check`.
 - If packaging locally, run `npm run tauri:build` after the checks above.
+
+<!-- polyharness:start -->
+<!-- polyharness:agents-version 1 -->
+## PolyHarness project contract
+
+### Purpose
+
+- Use the repository Harness to make bounded changes and produce current, admissible evidence.
+- Treat this file as the project map; detailed rules remain in their canonical project-owned files.
+
+### Project map
+
+- `root`: path `.`; capabilities: gui, web-ui.
+
+### Commands
+
+Workspace `root`:
+
+- `setup`: `npm install`
+- `dev`: `npm run tauri:dev`
+- `lint`: `<not configured>`
+- `typecheck`: `npx tsc --noEmit`
+- `test`: `cargo test --manifest-path src-tauri/Cargo.toml`
+- `browser-test`: `<not configured>`
+- `build`: `npm run tauri:build`
+- `check`: `npm run build && cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo check --manifest-path src-tauri/Cargo.toml`
+
+<!-- polyharness:commands-begin -->
+{"root":{"browser-test":null,"build":"npm run tauri:build","check":"npm run build && cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo check --manifest-path src-tauri/Cargo.toml","dev":"npm run tauri:dev","lint":null,"setup":"npm install","test":"cargo test --manifest-path src-tauri/Cargo.toml","typecheck":"npx tsc --noEmit"}}
+<!-- polyharness:commands-end -->
+
+### Boundaries
+
+- Preserve explicit goals, constraints, non-goals, deliverables, public APIs, and user-owned content.
+- Keep secrets out of repositories, prompts, examples, command output, and logs.
+- Require explicit approval for destructive actions, protected writes, releases, migrations, and external side effects.
+- Never update a managed project's language, framework, dependency, or lock-file versions.
+- Workspace `root` approval boundaries: Delete files, user data, or managed Profile data, Run database migrations, Change authentication or authorization behavior, Add dependencies or upgrade major dependency versions, Stage, commit, push, create branches or pull requests, publish, or release.
+
+### Definition of done
+
+- Run the smallest relevant project-owned checks after material changes.
+- Run the configured final `check` command after the last material edit.
+- Treat static configuration as at most `PRESENT`; only commands executed in the current run are `EXERCISED`.
+- Report changed files, exercised checks, unverified areas, remaining risk, external effects, and recovery steps.
+- Do not declare a goal achieved until every required criterion, constraint, and deliverable has current evidence.
+
+### Knowledge references
+
+- Workspace `root` `agentMap`: [AGENTS.md](AGENTS.md)
+
+<!-- polyharness:knowledge-begin -->
+{"root":{"agentMap":"AGENTS.md","architecture":null,"reliability":null,"security":null}}
+<!-- polyharness:knowledge-end -->
+
+<!-- polyharness:end -->

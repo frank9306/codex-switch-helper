@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "id": "plugin-cache-cleanup",
+  "objective": "Fix shared plugin synchronization so obsolete agents-shared plugin cache versions are reliably removed from every managed Profile, and verify managed Profile deletion removes only its owned Home.",
+  "acceptanceCriteria": [
+    {
+      "id": "cleanup",
+      "description": "After synchronization, each shared plugin cache contains only the currently selected version.",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "preserve",
+      "description": "The selected plugin version and its contents remain intact when obsolete versions are removed.",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "profile-delete",
+      "description": "Deleting a managed Profile removes its tool-owned Home directory without deleting unrelated directories.",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "regression",
+      "description": "Automated regression tests reproduce stale plugin-version residue and verify managed Profile directory deletion.",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "verification",
+      "description": "Rust tests, frontend build, formatting check, and Rust check pass after the change.",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    }
+  ],
+  "constraints": [
+    "Preserve unrelated uncommitted changes and existing Profile data outside plugins/cache/agents-shared.",
+    "Only remove obsolete version directories for plugins present in the shared marketplace.",
+    "Profile deletion may remove only the exact managed Home owned by the deleted Profile."
+  ],
+  "nonGoals": [
+    "Repair stale marketplace.json entries.",
+    "Change same-name plugin enablement behavior.",
+    "Change Skill discovery or synchronization."
+  ],
+  "requiredDeliverables": [
+    {
+      "id": "implementation",
+      "path": "src-tauri/src/main.rs"
+    }
+  ],
+  "risk": {
+    "level": "MEDIUM",
+    "reasons": [
+      "The fix and verification cover deletion inside tool-owned managed Profile directories."
+    ]
+  },
+  "escalateWhen": [
+    "The fix requires deleting data outside an exact managed Profile Home or changing plugin enablement semantics."
+  ],
+  "requiredApprovals": [
+    "Delete obsolete agents-shared plugin version cache directories during explicit synchronization.",
+    "Delete the exact tool-owned Home when the user explicitly deletes its managed Profile."
+  ],
+  "createdAt": "2026-08-04T01:35:27.538922+00:00",
+  "revisions": []
+}
