@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.13 - 2026-08-05
+
+- Fixed Skills and plugin usage counts so repeated use in separate task turns is counted separately while duplicate evidence within one turn is still deduplicated.
+- Included archived Codex sessions and explicit Skill activation announcements when rebuilding local usage statistics.
+
 ## 0.2.12 - 2026-08-05
 
 - Added local usage counts and last-used times to the Skills and Plugins views, with sorting by usage, recency, or name across all managed Profiles.

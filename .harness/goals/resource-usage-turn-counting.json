@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "id": "resource-usage-turn-counting",
+  "objective": "修复 Skills 和插件使用次数被压缩为每个会话最多一次的问题，并发布补丁版本",
+  "acceptanceCriteria": [
+    {
+      "id": "turn-count",
+      "description": "同一会话中不同用户任务轮次重复触发同一资源时分别计数，同一轮重复证据只计一次",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "history",
+      "description": "同时扫描 managed Profile 的 sessions 与 archived_sessions",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "skill-evidence",
+      "description": "Skill 使用兼容 SKILL.md 读取证据和明确启用声明",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "cache",
+      "description": "升级统计缓存并重新计算旧数据",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "release",
+      "description": "更新补丁版本与发布说明，并在检查通过后创建正式 GitHub Release",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    }
+  ],
+  "constraints": [
+    "不保存聊天正文，不新增依赖，不修改 Codex 会话文件"
+  ],
+  "nonGoals": [
+    "把技能列表中的被动提及计为使用"
+  ],
+  "requiredDeliverables": [
+    {
+      "id": "backend",
+      "path": "src-tauri/src/main.rs"
+    },
+    {
+      "id": "changelog",
+      "path": "CHANGELOG.md"
+    }
+  ],
+  "risk": {
+    "level": "MEDIUM",
+    "reasons": [
+      "Skill 启用声明是非结构化文本，需要严格匹配并以任务轮次去重"
+    ]
+  },
+  "escalateWhen": [
+    "需要修改或删除用户会话数据"
+  ],
+  "requiredApprovals": [],
+  "createdAt": "2026-08-05T02:59:11.926709+00:00",
+  "revisions": []
+}

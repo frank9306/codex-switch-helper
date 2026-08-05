@@ -241,13 +241,9 @@ struct SessionUsage {
     length: u64,
     modified_millis: u128,
     #[serde(default)]
-    skills: Vec<String>,
+    skill_uses: BTreeMap<String, BTreeMap<String, String>>,
     #[serde(default)]
-    plugins: Vec<String>,
-    #[serde(default)]
-    skill_used_at: BTreeMap<String, String>,
-    #[serde(default)]
-    plugin_used_at: BTreeMap<String, String>,
+    plugin_uses: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1141,6 +1137,14 @@ fn collect_files_with_extension(
     Ok(())
 }
 
+fn collect_profile_session_files(profile_home: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut files = Vec::new();
+    for directory in ["sessions", "archived_sessions"] {
+        collect_files_with_extension(&profile_home.join(directory), "jsonl", &mut files)?;
+    }
+    Ok(files)
+}
+
 fn plugin_usage_aliases(plugin_root: &Path, plugin_name: &str) -> BTreeSet<String> {
     let mut aliases = BTreeSet::from([plugin_name.to_string()]);
     let path = plugin_root.join(".mcp.json");
@@ -1167,28 +1171,52 @@ fn scan_session_usage(
         .map(|value| value.as_millis())
         .unwrap_or_default();
     let content = fs::read_to_string(path).map_err(format_io_error)?;
-    let mut skills = BTreeSet::new();
-    let mut plugins = BTreeSet::new();
-    let mut skill_used_at = BTreeMap::new();
-    let mut plugin_used_at = BTreeMap::new();
+    let mut skill_uses = BTreeMap::new();
+    let mut plugin_uses = BTreeMap::new();
+    let mut turn_index = 0usize;
     for line in content.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
+        if value.get("type").and_then(|item| item.as_str()) == Some("event_msg")
+            && value["payload"].get("type").and_then(|item| item.as_str()) == Some("user_message")
+        {
+            turn_index += 1;
+            continue;
+        }
         if value.get("type").and_then(|item| item.as_str()) != Some("response_item") {
             continue;
         }
         let payload = &value["payload"];
+        let timestamp = value
+            .get("timestamp")
+            .and_then(|item| item.as_str())
+            .unwrap_or_default();
+        let turn_key = turn_index.to_string();
+        if payload.get("type").and_then(|item| item.as_str()) == Some("message")
+            && payload.get("role").and_then(|item| item.as_str()) == Some("assistant")
+        {
+            let text = payload
+                .get("content")
+                .and_then(|item| item.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item.get("text").and_then(|text| text.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for name in skill_names {
+                if explicit_skill_announcement(&text, name) {
+                    record_resource_use(&mut skill_uses, name, &turn_key, timestamp);
+                }
+            }
+            continue;
+        }
         if !matches!(
             payload.get("type").and_then(|item| item.as_str()),
             Some("function_call" | "custom_tool_call")
         ) {
             continue;
         }
-        let timestamp = value
-            .get("timestamp")
-            .and_then(|item| item.as_str())
-            .unwrap_or_default();
         let call_name = payload
             .get("name")
             .and_then(|item| item.as_str())
@@ -1203,10 +1231,7 @@ fn scan_session_usage(
         for name in skill_names {
             let skill_token = format!("/{}/skill.md", name.to_ascii_lowercase());
             if normalized_input.contains(&skill_token) {
-                skills.insert(name.clone());
-                if !timestamp.is_empty() {
-                    skill_used_at.insert(name.clone(), timestamp.to_string());
-                }
+                record_resource_use(&mut skill_uses, name, &turn_key, timestamp);
             }
         }
         for (plugin, aliases) in plugin_aliases {
@@ -1220,21 +1245,76 @@ fn scan_session_usage(
                     || normalized_input.contains(&format!("tools.{literal}"))
             });
             if called {
-                plugins.insert(plugin.clone());
-                if !timestamp.is_empty() {
-                    plugin_used_at.insert(plugin.clone(), timestamp.to_string());
-                }
+                record_resource_use(&mut plugin_uses, plugin, &turn_key, timestamp);
             }
         }
     }
     Ok(SessionUsage {
         length: metadata.len(),
         modified_millis,
-        skills: skills.into_iter().collect(),
-        plugins: plugins.into_iter().collect(),
-        skill_used_at,
-        plugin_used_at,
+        skill_uses,
+        plugin_uses,
     })
+}
+
+fn explicit_skill_announcement(text: &str, skill_name: &str) -> bool {
+    let normalized = text.to_ascii_lowercase();
+    let name = skill_name.to_ascii_lowercase();
+    normalized
+        .split(['。', '！', '？', '；', '，', '\n', ';', '!', '?', ','])
+        .any(|clause| {
+            if !clause.contains(&name)
+                || [
+                    "不使用",
+                    "不会使用",
+                    "无需使用",
+                    "不要使用",
+                    "未使用",
+                    "没有使用",
+                    "不启用",
+                    "不适用",
+                    "do not use",
+                    "don't use",
+                    "won't use",
+                    "not using",
+                ]
+                .iter()
+                .any(|negative| clause.contains(negative))
+            {
+                return false;
+            }
+            let has_context =
+                clause.contains("技能") || clause.contains("skill") || clause.contains("流程");
+            let has_action = clause.contains("使用")
+                || clause.contains("启用")
+                || clause.contains("会用")
+                || clause.contains("using")
+                || clause.contains(&format!("按 `{name}`"))
+                || clause.contains(&format!("按 {name}"));
+            has_context && has_action
+        })
+}
+
+fn reset_usage_cache_for_catalog(cache: &mut ResourceUsageCache, signature: String) -> bool {
+    if cache.catalog_signature == signature {
+        return false;
+    }
+    cache.catalog_signature = signature;
+    cache.sessions.clear();
+    true
+}
+
+fn record_resource_use(
+    uses: &mut BTreeMap<String, BTreeMap<String, String>>,
+    resource_name: &str,
+    turn_key: &str,
+    timestamp: &str,
+) {
+    let turns = uses.entry(resource_name.to_string()).or_default();
+    let current = turns.entry(turn_key.to_string()).or_default();
+    if timestamp > current.as_str() {
+        *current = timestamp.to_string();
+    }
 }
 
 fn session_usage_is_current(session: &SessionUsage, metadata: &fs::Metadata) -> bool {
@@ -1250,18 +1330,18 @@ fn session_usage_is_current(session: &SessionUsage, metadata: &fs::Metadata) -> 
 fn summarize_resource_usage(cache: &ResourceUsageCache) -> ResourceUsage {
     let mut usage = ResourceUsage::default();
     for session in cache.sessions.values() {
-        for name in &session.skills {
+        for (name, turns) in &session.skill_uses {
             let summary = usage.skills.entry(name.clone()).or_default();
-            summary.count += 1;
-            let used_at = session.skill_used_at.get(name).cloned();
+            summary.count += turns.len();
+            let used_at = turns.values().max().cloned();
             if used_at > summary.last_used_at {
                 summary.last_used_at = used_at;
             }
         }
-        for name in &session.plugins {
+        for (name, turns) in &session.plugin_uses {
             let summary = usage.plugins.entry(name.clone()).or_default();
-            summary.count += 1;
-            let used_at = session.plugin_used_at.get(name).cloned();
+            summary.count += turns.len();
+            let used_at = turns.values().max().cloned();
             if used_at > summary.last_used_at {
                 summary.last_used_at = used_at;
             }
@@ -1296,23 +1376,18 @@ fn resource_usage(app: &AppHandle) -> Result<ResourceUsage, String> {
             (manifest.name, aliases)
         })
         .collect::<BTreeMap<_, _>>();
-    let catalog_signature = format!("v2|{skill_names:?}|{plugin_aliases:?}");
+    let catalog_signature = format!("v3|{skill_names:?}|{plugin_aliases:?}");
     let cache_path = resource_usage_cache_path(app)?;
     let mut cache: ResourceUsageCache = fs::read_to_string(&cache_path)
         .ok()
         .and_then(|content| serde_json::from_str(&content).ok())
         .unwrap_or_default();
-    if cache.catalog_signature != catalog_signature {
-        cache.catalog_signature = catalog_signature;
-        cache.sessions.clear();
-    }
+    reset_usage_cache_for_catalog(&mut cache, catalog_signature);
     let mut session_files = Vec::new();
     for profile in data.profiles.iter().filter(|profile| profile.managed) {
-        collect_files_with_extension(
-            &Path::new(&profile.home_path).join("sessions"),
-            "jsonl",
-            &mut session_files,
-        )?;
+        session_files.extend(collect_profile_session_files(Path::new(
+            &profile.home_path,
+        ))?);
     }
     let current_paths = session_files
         .iter()
@@ -3821,20 +3896,21 @@ enabled = true
 
         let usage = scan_session_usage(&session, &skills, &plugins).unwrap();
 
-        assert_eq!(usage.skills, vec!["hunt"]);
-        assert_eq!(usage.plugins, vec!["browser-automation"]);
+        assert_eq!(usage.skill_uses["hunt"].len(), 1);
+        assert_eq!(usage.plugin_uses["browser-automation"].len(), 1);
         assert_eq!(
-            usage.skill_used_at.get("hunt").map(String::as_str),
+            usage.skill_uses["hunt"].get("0").map(String::as_str),
             Some("2026-08-05T01:01:00Z")
         );
         assert_eq!(
             usage
-                .plugin_used_at
+                .plugin_uses
                 .get("browser-automation")
+                .and_then(|turns| turns.get("0"))
                 .map(String::as_str),
             Some("2026-08-05T01:03:00Z")
         );
-        assert!(!usage.plugins.contains(&"unused-plugin".to_string()));
+        assert!(!usage.plugin_uses.contains_key("unused-plugin"));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3862,10 +3938,132 @@ enabled = true
     }
 
     #[test]
+    fn profile_session_discovery_includes_archived_sessions() {
+        let root = env::temp_dir().join(format!("resource-history-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("sessions/2026/08/05")).unwrap();
+        fs::create_dir_all(root.join("archived_sessions")).unwrap();
+        fs::write(root.join("sessions/2026/08/05/active.jsonl"), "{}\n").unwrap();
+        fs::write(root.join("archived_sessions/archived.jsonl"), "{}\n").unwrap();
+
+        let files = collect_profile_session_files(&root).unwrap();
+
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().any(|path| path.ends_with("active.jsonl")));
+        assert!(files.iter().any(|path| path.ends_with("archived.jsonl")));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn session_usage_counts_the_same_skill_once_per_user_turn() {
+        let root = env::temp_dir().join(format!("resource-turn-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let session = root.join("session.jsonl");
+        let content = concat!(
+            r#"{"timestamp":"2026-08-05T01:00:00Z","type":"event_msg","payload":{"type":"user_message"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-05T01:01:00Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"Get-Content C:/skills/hunt/SKILL.md"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-05T01:02:00Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"Get-Content C:/skills/hunt/SKILL.md"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-05T01:03:00Z","type":"response_item","payload":{"type":"function_call","name":"mcp__browser_automation__run"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-05T01:04:00Z","type":"response_item","payload":{"type":"function_call","name":"mcp__browser_automation__run_again"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-05T02:00:00Z","type":"event_msg","payload":{"type":"user_message"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-05T02:01:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"这里会使用 hunt 技能定位根因。"}]}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-05T02:02:00Z","type":"response_item","payload":{"type":"function_call","name":"mcp__browser_automation__run"}}"#,
+        );
+        fs::write(&session, content).unwrap();
+        let scanned = scan_session_usage(
+            &session,
+            &BTreeSet::from(["hunt".to_string()]),
+            &BTreeMap::from([(
+                "browser-automation".to_string(),
+                BTreeSet::from(["browser-automation".to_string()]),
+            )]),
+        )
+        .unwrap();
+        let cache = ResourceUsageCache {
+            sessions: BTreeMap::from([("session.jsonl".to_string(), scanned)]),
+            ..ResourceUsageCache::default()
+        };
+
+        let usage = summarize_resource_usage(&cache);
+
+        assert_eq!(usage.skills["hunt"].count, 2);
+        assert_eq!(usage.plugins["browser-automation"].count, 2);
+        assert_eq!(
+            usage.plugins["browser-automation"].last_used_at.as_deref(),
+            Some("2026-08-05T02:02:00Z")
+        );
+        assert_eq!(
+            usage.skills["hunt"].last_used_at.as_deref(),
+            Some("2026-08-05T02:01:00Z")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn skill_announcement_detection_requires_action_and_context() {
+        assert!(explicit_skill_announcement(
+            "这里会使用 `hunt` 技能先确认根因。",
+            "hunt"
+        ));
+        assert!(explicit_skill_announcement(
+            "继续按 hunt 流程追踪问题。",
+            "hunt"
+        ));
+        assert!(!explicit_skill_announcement(
+            "Available skills: hunt, check, write.",
+            "hunt"
+        ));
+        assert!(!explicit_skill_announcement(
+            "这不是 hunt 技能导致的问题。",
+            "hunt"
+        ));
+        assert!(!explicit_skill_announcement(
+            "我们不会使用 hunt 技能。",
+            "hunt"
+        ));
+        assert!(!explicit_skill_announcement("无需使用 hunt 技能。", "hunt"));
+        assert!(!explicit_skill_announcement(
+            "使用 check 技能；hunt 技能不适用。",
+            "hunt"
+        ));
+        assert!(explicit_skill_announcement(
+            "不使用 check 技能，但会使用 hunt 技能。",
+            "hunt"
+        ));
+    }
+
+    #[test]
+    fn usage_cache_catalog_upgrade_forces_a_rescan() {
+        let mut cache = ResourceUsageCache {
+            catalog_signature: "v2|old".to_string(),
+            sessions: BTreeMap::from([("session.jsonl".to_string(), SessionUsage::default())]),
+        };
+
+        assert!(reset_usage_cache_for_catalog(
+            &mut cache,
+            "v3|current".to_string()
+        ));
+        assert_eq!(cache.catalog_signature, "v3|current");
+        assert!(cache.sessions.is_empty());
+        assert!(!reset_usage_cache_for_catalog(
+            &mut cache,
+            "v3|current".to_string()
+        ));
+    }
+
+    #[test]
     fn usage_summary_aggregates_sessions_from_multiple_profiles() {
         let session = |timestamp: &str| SessionUsage {
-            skills: vec!["hunt".to_string()],
-            skill_used_at: BTreeMap::from([("hunt".to_string(), timestamp.to_string())]),
+            skill_uses: BTreeMap::from([(
+                "hunt".to_string(),
+                BTreeMap::from([("1".to_string(), timestamp.to_string())]),
+            )]),
             ..SessionUsage::default()
         };
         let cache = ResourceUsageCache {
