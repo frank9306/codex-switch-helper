@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.12 - 2026-08-05
+
+- Added local usage counts and last-used times to the Skills and Plugins views, with sorting by usage, recency, or name across all managed Profiles.
+- Kept historical session scanning private and responsive through metadata-only incremental caching, per-task deduplication, and background processing.
+
 ## 0.2.11 - 2026-08-04
 
 - Routed the Codex desktop Chromium network service through the configured HTTP or SOCKS5 proxy, preventing long startup waits without TUN mode while preserving proxy environment variables for AI conversations and child processes.

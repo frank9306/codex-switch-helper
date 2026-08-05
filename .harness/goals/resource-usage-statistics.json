@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "id": "resource-usage-statistics",
+  "objective": "在现有 Skills 和插件列表中显示基于所有托管 Profile 本地 Codex 会话记录汇总的使用次数与最近使用时间",
+  "acceptanceCriteria": [
+    {
+      "id": "usage-count",
+      "description": "Skills 按任务内读取对应 SKILL.md 首次事件计数，插件按任务内实际插件工具首次调用计数",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "aggregation",
+      "description": "统计覆盖全部托管 Profile，且同一任务同一资源最多计数一次",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "display",
+      "description": "Skills 和插件列表显示使用次数与最近使用时间，并支持按使用次数和最近使用时间排序",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "privacy",
+      "description": "持久化统计不得保存聊天正文，只保存资源标识、次数、最近时间与扫描状态",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "incremental",
+      "description": "首次扫描历史会话，后续能够增量更新且不重复计数",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    }
+  ],
+  "constraints": [
+    "不新增依赖；不修改 Codex 本体；保留现有资源管理 API 和用户数据"
+  ],
+  "nonGoals": [
+    "统计未安装的推荐插件",
+    "提供绝对精确的 Skill 结构化触发事件"
+  ],
+  "requiredDeliverables": [
+    {
+      "id": "backend",
+      "path": "src-tauri/src/main.rs"
+    },
+    {
+      "id": "frontend",
+      "path": "src/main.tsx"
+    },
+    {
+      "id": "styles",
+      "path": "src/style.css"
+    }
+  ],
+  "risk": {
+    "level": "MEDIUM",
+    "reasons": [
+      "会话日志格式属于外部数据格式且 Skill 触发只能基于读取证据推断"
+    ]
+  },
+  "escalateWhen": [
+    "需要新增依赖、删除用户数据或修改认证行为"
+  ],
+  "requiredApprovals": [],
+  "createdAt": "2026-08-05T01:45:58.424070+00:00",
+  "revisions": []
+}

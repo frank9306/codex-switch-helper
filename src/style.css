@@ -1131,6 +1131,11 @@ code {
   padding-block: 9px;
 }
 
+.skills-view-actions select {
+  min-width: 128px;
+  padding-block: 9px;
+}
+
 .skills-view-actions {
   flex-wrap: wrap;
   justify-content: flex-end;
@@ -1456,6 +1461,12 @@ button.notice-close:hover:not(:disabled) {
   color: var(--muted);
   font-size: 10px;
   padding: 0;
+}
+
+.resource-usage {
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 750;
 }
 
 .skill-source {

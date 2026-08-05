@@ -44,8 +44,8 @@ Tauri desktop helper for switching Codex App profiles on Windows.
 ## Shared AGENTS.md, Skills, And Plugins
 
 - The global `~/.agents/AGENTS.md` is linked into every managed Profile Home and can be viewed, edited, refreshed, and inspected for its last modification time in the app.
-- The Skills view shows version and update metadata, supports source-aware update checks and protected deletion, and automatically imports only missing entries without overwriting an existing shared Skill.
-- The Plugins view shows version and update metadata, supports source-aware update checks and protected deletion, and automatically synchronizes shared versions to every managed Profile.
+- The Skills view shows version, update metadata, locally inferred usage counts, and last-used times; it supports sorting, source-aware update checks, and protected deletion while importing only missing entries without overwriting an existing shared Skill.
+- The Plugins view shows version, update metadata, actual tool-call usage counts, and last-used times; it supports sorting, source-aware update checks, and protected deletion while automatically synchronizing shared versions to every managed Profile.
 - Shared plugins live under `~/.agents/plugins/<plugin>/<version>`, with the local Marketplace manifest at `~/.agents/plugins/marketplace.json`.
 - Plugins from OpenAI bundled or official Marketplaces are excluded from the shared library.
 - Same-name, same-version plugins with different contents are reported as conflicts instead of being overwritten silently.
@@ -124,4 +124,4 @@ npm run tauri:build
 
 Also update `CHANGELOG.md`, `README.md`, and `README.zh-CN.md` before tagging a release.
 
-Current release: `0.2.11`.
+Current release: `0.2.12`.

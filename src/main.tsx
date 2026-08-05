@@ -139,6 +139,8 @@ type SharedResources = {
     sourceLabel?: string | null
     canUpdate: boolean
     updatedAt?: string | null
+    usageCount: number
+    lastUsedAt?: string | null
   }>
 }
 
@@ -160,6 +162,8 @@ type SharedPlugins = {
     sourceLabel?: string | null
     canUpdate: boolean
     updatedAt?: string | null
+    usageCount: number
+    lastUsedAt?: string | null
   }>
 }
 
@@ -1253,16 +1257,23 @@ function ResourcesPanel(props: {
 }) {
   const [activeResourceView, setActiveResourceView] = useState<'prompt' | 'skills' | 'plugins'>('prompt')
   const [skillQuery, setSkillQuery] = useState('')
+  const [resourceSort, setResourceSort] = useState<'name' | 'usage' | 'recent'>('usage')
   if (!props.resources) {
     return <section className="panel resource-loading"><LoadingIndicator label="正在读取共享资源..." /></section>
   }
   const normalizedQuery = skillQuery.trim().toLocaleLowerCase()
-  const filteredSkills = props.resources.skills.filter((skill) => (
+  const sortResources = <T extends { name: string; usageCount: number; lastUsedAt?: string | null }>(items: T[]) => [...items].sort((a, b) => {
+    if (resourceSort === 'usage') return b.usageCount - a.usageCount || a.name.localeCompare(b.name)
+    if (resourceSort === 'recent') return (b.lastUsedAt || '').localeCompare(a.lastUsedAt || '') || a.name.localeCompare(b.name)
+    return a.name.localeCompare(b.name)
+  })
+  const filteredSkills = sortResources(props.resources.skills.filter((skill) => (
     !normalizedQuery
     || skill.name.toLocaleLowerCase().includes(normalizedQuery)
     || skill.description?.toLocaleLowerCase().includes(normalizedQuery)
     || skill.path.toLocaleLowerCase().includes(normalizedQuery)
-  ))
+  )))
+  const sortedPlugins = sortResources(props.plugins?.plugins || [])
   const skillGroups = [
     { key: 'shared', title: '全局共享', description: '~/.agents/skills，可供所有 Profile 使用', skills: filteredSkills.filter((skill) => skill.shared) },
     { key: 'legacy', title: '默认 Home', description: '~/.codex/skills，可导入全局共享目录', skills: filteredSkills.filter((skill) => !skill.shared) },
@@ -1317,6 +1328,11 @@ function ResourcesPanel(props: {
             </div>
             <div className="skills-view-actions">
               <input aria-label="搜索 Skills" onChange={(event) => setSkillQuery(event.target.value)} placeholder="搜索 Skills" type="search" value={skillQuery} />
+              <select aria-label="Skills 排序" onChange={(event) => setResourceSort(event.target.value as 'name' | 'usage' | 'recent')} value={resourceSort}>
+                <option value="usage">按使用次数</option>
+                <option value="recent">按最近使用</option>
+                <option value="name">按名称</option>
+              </select>
               <button className="secondary-action compact" disabled={props.busy} onClick={() => props.onAddLocal('skill')} type="button">
                 从本地添加
               </button>
@@ -1350,6 +1366,7 @@ function ResourcesPanel(props: {
                         <p>{skill.description || '未提供说明'}</p>
                         <code>{skill.path}</code>
                         <small className="resource-updated-time">最后更新：{formatResourceTime(skill.updatedAt)}</small>
+                        <small className="resource-usage">使用 {skill.usageCount} 次 · 最近使用：{skill.lastUsedAt ? formatResourceTime(skill.lastUsedAt) : '未发现记录'}</small>
                         {skill.sourceLabel && <small className="resource-origin">来源：{skill.sourceLabel}</small>}
                       </div>
                       {skill.shared && (
@@ -1373,6 +1390,11 @@ function ResourcesPanel(props: {
               <p>第三方插件统一保存在 ~/.agents，并默认同步到所有托管 Profile。</p>
             </div>
             <div className="skills-view-actions">
+              <select aria-label="插件排序" onChange={(event) => setResourceSort(event.target.value as 'name' | 'usage' | 'recent')} value={resourceSort}>
+                <option value="usage">按使用次数</option>
+                <option value="recent">按最近使用</option>
+                <option value="name">按名称</option>
+              </select>
               <button className="secondary-action compact" disabled={props.busy} onClick={() => props.onAddLocal('plugin')} type="button">
                 从本地添加
               </button>
@@ -1385,17 +1407,17 @@ function ResourcesPanel(props: {
             <code>{props.plugins?.marketplacePath || '~/.agents/plugins/marketplace.json'}</code>
           </div>
           <div className="skill-groups">
-            {props.plugins?.plugins.length ? (
+            {sortedPlugins.length ? (
               <section className="skill-group">
                 <header className="skill-group-heading">
                   <div>
                     <h3>全局共享</h3>
                     <p>官方内置插件不在此处管理</p>
                   </div>
-                  <span>{props.plugins.plugins.length}</span>
+                  <span>{sortedPlugins.length}</span>
                 </header>
                 <div className="skill-list">
-                  {props.plugins.plugins.map((plugin) => {
+                  {sortedPlugins.map((plugin) => {
                     const fullySynced = plugin.syncedProfiles === plugin.totalProfiles
                     return (
                       <article className="skill-list-row" key={`${plugin.name}@${plugin.version}`}>
@@ -1407,6 +1429,7 @@ function ResourcesPanel(props: {
                           <p>已同步 {plugin.syncedProfiles}/{plugin.totalProfiles} 个 Profile</p>
                           <code>{plugin.path}</code>
                           <small className="resource-updated-time">最后更新：{formatResourceTime(plugin.updatedAt)}</small>
+                          <small className="resource-usage">使用 {plugin.usageCount} 次 · 最近使用：{plugin.lastUsedAt ? formatResourceTime(plugin.lastUsedAt) : '未发现记录'}</small>
                           {plugin.sourceLabel && <small className="resource-origin">来源：{plugin.sourceLabel}</small>}
                         </div>
                         <div className="resource-row-actions">

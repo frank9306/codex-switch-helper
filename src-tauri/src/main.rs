@@ -7,7 +7,7 @@ use std::os::windows::fs::symlink_file;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env,
     ffi::{OsStr, OsString},
     fs, io,
@@ -33,6 +33,7 @@ const NO_PROXY_ENV_KEY: &str = "NO_PROXY";
 const LOOPBACK_NO_PROXY: &str = "127.0.0.1,localhost,::1";
 const DATA_FILE_OVERRIDE_ENV_KEY: &str = "CODEX_SWITCH_HELPER_DATA_FILE";
 const RESOURCE_SOURCES_FILENAME: &str = "resource-sources.json";
+const RESOURCE_USAGE_FILENAME: &str = "resource-usage.json";
 const AUTOSTART_REGISTRY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const AUTOSTART_VALUE_NAME: &str = "Codex Switch Helper";
 
@@ -182,6 +183,8 @@ struct SkillInfo {
     source_label: Option<String>,
     can_update: bool,
     updated_at: Option<String>,
+    usage_count: usize,
+    last_used_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -207,6 +210,44 @@ struct SharedPluginInfo {
     source_label: Option<String>,
     can_update: bool,
     updated_at: Option<String>,
+    usage_count: usize,
+    last_used_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ResourceUsage {
+    skills: BTreeMap<String, UsageSummary>,
+    plugins: BTreeMap<String, UsageSummary>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct UsageSummary {
+    count: usize,
+    last_used_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceUsageCache {
+    #[serde(default)]
+    catalog_signature: String,
+    #[serde(default)]
+    sessions: BTreeMap<String, SessionUsage>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionUsage {
+    length: u64,
+    modified_millis: u128,
+    #[serde(default)]
+    skills: Vec<String>,
+    #[serde(default)]
+    plugins: Vec<String>,
+    #[serde(default)]
+    skill_used_at: BTreeMap<String, String>,
+    #[serde(default)]
+    plugin_used_at: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -314,9 +355,14 @@ struct CodexInstance {
 }
 
 static CODEX_INSTANCES: OnceLock<Mutex<Vec<CodexInstance>>> = OnceLock::new();
+static RESOURCE_USAGE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn codex_instances() -> &'static Mutex<Vec<CodexInstance>> {
     CODEX_INSTANCES.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn resource_usage_lock() -> &'static Mutex<()> {
+    RESOURCE_USAGE_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 impl Default for AppSettings {
@@ -1071,8 +1117,244 @@ fn link_agents_file(source: &Path, codex_home: &Path) -> Result<(), String> {
     std::os::unix::fs::symlink(&source, &target).map_err(format_io_error)
 }
 
+fn resource_usage_cache_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app_data_dir(app)?.join(RESOURCE_USAGE_FILENAME))
+}
+
+fn collect_files_with_extension(
+    root: &Path,
+    extension: &str,
+    files: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    if !root.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root).map_err(format_io_error)? {
+        let entry = entry.map_err(format_io_error)?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files_with_extension(&path, extension, files)?;
+        } else if path.extension() == Some(OsStr::new(extension)) {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn plugin_usage_aliases(plugin_root: &Path, plugin_name: &str) -> BTreeSet<String> {
+    let mut aliases = BTreeSet::from([plugin_name.to_string()]);
+    let path = plugin_root.join(".mcp.json");
+    if let Ok(content) = fs::read_to_string(path) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(servers) = value.get("mcpServers").and_then(|item| item.as_object()) {
+                aliases.extend(servers.keys().cloned());
+            }
+        }
+    }
+    aliases
+}
+
+fn scan_session_usage(
+    path: &Path,
+    skill_names: &BTreeSet<String>,
+    plugin_aliases: &BTreeMap<String, BTreeSet<String>>,
+) -> Result<SessionUsage, String> {
+    let metadata = fs::metadata(path).map_err(format_io_error)?;
+    let modified_millis = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|value| value.as_millis())
+        .unwrap_or_default();
+    let content = fs::read_to_string(path).map_err(format_io_error)?;
+    let mut skills = BTreeSet::new();
+    let mut plugins = BTreeSet::new();
+    let mut skill_used_at = BTreeMap::new();
+    let mut plugin_used_at = BTreeMap::new();
+    for line in content.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value.get("type").and_then(|item| item.as_str()) != Some("response_item") {
+            continue;
+        }
+        let payload = &value["payload"];
+        if !matches!(
+            payload.get("type").and_then(|item| item.as_str()),
+            Some("function_call" | "custom_tool_call")
+        ) {
+            continue;
+        }
+        let timestamp = value
+            .get("timestamp")
+            .and_then(|item| item.as_str())
+            .unwrap_or_default();
+        let call_name = payload
+            .get("name")
+            .and_then(|item| item.as_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let call_input = payload
+            .get("input")
+            .or_else(|| payload.get("arguments"))
+            .and_then(|item| item.as_str())
+            .unwrap_or_default();
+        let normalized_input = call_input.replace('\\', "/").to_ascii_lowercase();
+        for name in skill_names {
+            let skill_token = format!("/{}/skill.md", name.to_ascii_lowercase());
+            if normalized_input.contains(&skill_token) {
+                skills.insert(name.clone());
+                if !timestamp.is_empty() {
+                    skill_used_at.insert(name.clone(), timestamp.to_string());
+                }
+            }
+        }
+        for (plugin, aliases) in plugin_aliases {
+            let called = aliases.iter().any(|alias| {
+                let normalized_alias = alias.to_ascii_lowercase().replace('-', "_");
+                let underscored = format!("mcp__{normalized_alias}__");
+                let literal = format!("mcp__{}__", alias.to_ascii_lowercase());
+                call_name.starts_with(&underscored)
+                    || call_name.starts_with(&literal)
+                    || normalized_input.contains(&format!("tools.{underscored}"))
+                    || normalized_input.contains(&format!("tools.{literal}"))
+            });
+            if called {
+                plugins.insert(plugin.clone());
+                if !timestamp.is_empty() {
+                    plugin_used_at.insert(plugin.clone(), timestamp.to_string());
+                }
+            }
+        }
+    }
+    Ok(SessionUsage {
+        length: metadata.len(),
+        modified_millis,
+        skills: skills.into_iter().collect(),
+        plugins: plugins.into_iter().collect(),
+        skill_used_at,
+        plugin_used_at,
+    })
+}
+
+fn session_usage_is_current(session: &SessionUsage, metadata: &fs::Metadata) -> bool {
+    let modified_millis = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|value| value.as_millis())
+        .unwrap_or_default();
+    session.length == metadata.len() && session.modified_millis == modified_millis
+}
+
+fn summarize_resource_usage(cache: &ResourceUsageCache) -> ResourceUsage {
+    let mut usage = ResourceUsage::default();
+    for session in cache.sessions.values() {
+        for name in &session.skills {
+            let summary = usage.skills.entry(name.clone()).or_default();
+            summary.count += 1;
+            let used_at = session.skill_used_at.get(name).cloned();
+            if used_at > summary.last_used_at {
+                summary.last_used_at = used_at;
+            }
+        }
+        for name in &session.plugins {
+            let summary = usage.plugins.entry(name.clone()).or_default();
+            summary.count += 1;
+            let used_at = session.plugin_used_at.get(name).cloned();
+            if used_at > summary.last_used_at {
+                summary.last_used_at = used_at;
+            }
+        }
+    }
+    usage
+}
+
+fn resource_usage(app: &AppHandle) -> Result<ResourceUsage, String> {
+    let _guard = resource_usage_lock()
+        .lock()
+        .map_err(|_| "使用统计锁不可用。".to_string())?;
+    let data = load_data(app)?;
+    let mut skill_names = BTreeSet::new();
+    for root in [
+        agents_root()?.join("skills"),
+        default_codex_home()?.join("skills"),
+    ] {
+        if root.is_dir() {
+            for entry in fs::read_dir(root).map_err(format_io_error)? {
+                let entry = entry.map_err(format_io_error)?;
+                if entry.path().join("SKILL.md").is_file() {
+                    skill_names.insert(entry.file_name().to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    let plugin_aliases = collect_shared_plugins()?
+        .into_iter()
+        .map(|(manifest, path)| {
+            let aliases = plugin_usage_aliases(&path, &manifest.name);
+            (manifest.name, aliases)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let catalog_signature = format!("v2|{skill_names:?}|{plugin_aliases:?}");
+    let cache_path = resource_usage_cache_path(app)?;
+    let mut cache: ResourceUsageCache = fs::read_to_string(&cache_path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default();
+    if cache.catalog_signature != catalog_signature {
+        cache.catalog_signature = catalog_signature;
+        cache.sessions.clear();
+    }
+    let mut session_files = Vec::new();
+    for profile in data.profiles.iter().filter(|profile| profile.managed) {
+        collect_files_with_extension(
+            &Path::new(&profile.home_path).join("sessions"),
+            "jsonl",
+            &mut session_files,
+        )?;
+    }
+    let current_paths = session_files
+        .iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect::<BTreeSet<_>>();
+    cache
+        .sessions
+        .retain(|path, _| current_paths.contains(path));
+    for path in session_files {
+        let key = path.to_string_lossy().to_string();
+        let metadata = fs::metadata(&path).map_err(format_io_error)?;
+        let unchanged = cache
+            .sessions
+            .get(&key)
+            .is_some_and(|session| session_usage_is_current(session, &metadata));
+        if !unchanged {
+            cache.sessions.insert(
+                key,
+                scan_session_usage(&path, &skill_names, &plugin_aliases)?,
+            );
+        }
+    }
+    if let Some(parent) = cache_path.parent() {
+        fs::create_dir_all(parent).map_err(format_io_error)?;
+    }
+    fs::write(
+        &cache_path,
+        serde_json::to_string_pretty(&cache).map_err(|error| error.to_string())?,
+    )
+    .map_err(format_io_error)?;
+    Ok(summarize_resource_usage(&cache))
+}
+
 #[tauri::command]
-fn get_shared_resources(app: AppHandle) -> Result<SharedResources, String> {
+async fn get_shared_resources(app: AppHandle) -> Result<SharedResources, String> {
+    tauri::async_runtime::spawn_blocking(move || get_shared_resources_blocking(app))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn get_shared_resources_blocking(app: AppHandle) -> Result<SharedResources, String> {
+    let usage = resource_usage(&app)?;
     let registry = load_resource_registry(&app)?;
     let root = agents_root()?;
     let agents_path = root.join(SHARED_AGENTS_FILENAME);
@@ -1101,6 +1383,12 @@ fn get_shared_resources(app: AppHandle) -> Result<SharedResources, String> {
     )?;
     legacy_skills.retain(|legacy| !skills.iter().any(|skill| skill.name == legacy.name));
     skills.extend(legacy_skills);
+    for skill in &mut skills {
+        if let Some(summary) = usage.skills.get(&skill.name) {
+            skill.usage_count = summary.count;
+            skill.last_used_at.clone_from(&summary.last_used_at);
+        }
+    }
     skills.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| b.shared.cmp(&a.shared)));
     Ok(SharedResources {
         agents_path: agents_path.to_string_lossy().to_string(),
@@ -1150,6 +1438,8 @@ fn collect_skills(
                 can_update: registration.is_some(),
                 updated_at: file_modified_at(&skill_file)
                     .or_else(|| registration.map(|item| item.updated_at.clone())),
+                usage_count: 0,
+                last_used_at: None,
             });
         }
     }
@@ -2065,7 +2355,14 @@ fn sync_shared_plugins_to_profile(home: &Path) -> Result<(usize, usize), String>
 }
 
 #[tauri::command]
-fn get_shared_plugins(app: AppHandle) -> Result<SharedPlugins, String> {
+async fn get_shared_plugins(app: AppHandle) -> Result<SharedPlugins, String> {
+    tauri::async_runtime::spawn_blocking(move || get_shared_plugins_blocking(app))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn get_shared_plugins_blocking(app: AppHandle) -> Result<SharedPlugins, String> {
+    let usage = resource_usage(&app)?;
     let data = load_data(&app)?;
     let registry = load_resource_registry(&app)?;
     let profiles = data
@@ -2092,6 +2389,7 @@ fn get_shared_plugins(app: AppHandle) -> Result<SharedPlugins, String> {
                         .is_dir()
                 })
                 .count();
+            let usage_summary = usage.plugins.get(&manifest.name);
             SharedPluginInfo {
                 name: manifest.name,
                 version: manifest.version,
@@ -2104,6 +2402,8 @@ fn get_shared_plugins(app: AppHandle) -> Result<SharedPlugins, String> {
                 can_update: registration.is_some(),
                 updated_at: file_modified_at(&path)
                     .or_else(|| registration.map(|item| item.updated_at.clone())),
+                usage_count: usage_summary.map_or(0, |summary| summary.count),
+                last_used_at: usage_summary.and_then(|summary| summary.last_used_at.clone()),
             }
         })
         .collect();
@@ -3487,6 +3787,107 @@ enabled = true
         assert_eq!(
             frontmatter_value(content, "description").as_deref(),
             Some("Example skill")
+        );
+    }
+
+    #[test]
+    fn session_usage_counts_each_resource_once_and_ignores_plain_messages() {
+        let root = env::temp_dir().join(format!("resource-usage-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let session = root.join("session.jsonl");
+        let content = concat!(
+            r#"{"timestamp":"2026-08-05T01:00:00Z","type":"response_item","payload":{"type":"message","text":"C:/skills/hunt/SKILL.md mcp__browser_automation__run"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-05T01:01:00Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"Get-Content C:/skills/hunt/SKILL.md"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-05T01:01:30Z","type":"response_item","payload":{"type":"function_call","name":"shell_command","arguments":"echo mcp__unused_plugin__run"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-05T01:02:00Z","type":"response_item","payload":{"type":"function_call","name":"mcp__browser_automation__run"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-05T01:03:00Z","type":"response_item","payload":{"type":"function_call","name":"mcp__browser_automation__run_again"}}"#,
+        );
+        fs::write(&session, content).unwrap();
+        let skills = BTreeSet::from(["hunt".to_string()]);
+        let plugins = BTreeMap::from([
+            (
+                "browser-automation".to_string(),
+                BTreeSet::from(["browser-automation".to_string()]),
+            ),
+            (
+                "unused-plugin".to_string(),
+                BTreeSet::from(["unused-plugin".to_string()]),
+            ),
+        ]);
+
+        let usage = scan_session_usage(&session, &skills, &plugins).unwrap();
+
+        assert_eq!(usage.skills, vec!["hunt"]);
+        assert_eq!(usage.plugins, vec!["browser-automation"]);
+        assert_eq!(
+            usage.skill_used_at.get("hunt").map(String::as_str),
+            Some("2026-08-05T01:01:00Z")
+        );
+        assert_eq!(
+            usage
+                .plugin_used_at
+                .get("browser-automation")
+                .map(String::as_str),
+            Some("2026-08-05T01:03:00Z")
+        );
+        assert!(!usage.plugins.contains(&"unused-plugin".to_string()));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn session_cache_detects_appended_history() {
+        let root = env::temp_dir().join(format!("resource-cache-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let session = root.join("session.jsonl");
+        fs::write(&session, "{}\n").unwrap();
+        let cached = scan_session_usage(&session, &BTreeSet::new(), &BTreeMap::new()).unwrap();
+        assert!(session_usage_is_current(
+            &cached,
+            &fs::metadata(&session).unwrap()
+        ));
+
+        let mut content = fs::read_to_string(&session).unwrap();
+        content.push_str("{}\n");
+        fs::write(&session, content).unwrap();
+
+        assert!(!session_usage_is_current(
+            &cached,
+            &fs::metadata(&session).unwrap()
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn usage_summary_aggregates_sessions_from_multiple_profiles() {
+        let session = |timestamp: &str| SessionUsage {
+            skills: vec!["hunt".to_string()],
+            skill_used_at: BTreeMap::from([("hunt".to_string(), timestamp.to_string())]),
+            ..SessionUsage::default()
+        };
+        let cache = ResourceUsageCache {
+            sessions: BTreeMap::from([
+                (
+                    "profiles/p1/home/sessions/a.jsonl".to_string(),
+                    session("2026-08-01T00:00:00Z"),
+                ),
+                (
+                    "profiles/p2/home/sessions/b.jsonl".to_string(),
+                    session("2026-08-02T00:00:00Z"),
+                ),
+            ]),
+            ..ResourceUsageCache::default()
+        };
+
+        let usage = summarize_resource_usage(&cache);
+
+        assert_eq!(usage.skills["hunt"].count, 2);
+        assert_eq!(
+            usage.skills["hunt"].last_used_at.as_deref(),
+            Some("2026-08-02T00:00:00Z")
         );
     }
 
