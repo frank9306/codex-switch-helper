@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use chrono::{DateTime, Utc};
+use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 #[cfg(windows)]
 use std::os::windows::fs::symlink_file;
@@ -10,7 +11,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env,
     ffi::{OsStr, OsString},
-    fs, io,
+    fs,
+    io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::Command,
     sync::{Mutex, OnceLock},
@@ -18,7 +20,7 @@ use std::{
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, WindowEvent,
+    AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 use uuid::Uuid;
 use winreg::{enums::HKEY_CURRENT_USER, RegKey};
@@ -131,6 +133,8 @@ struct AppSettings {
     proxy_port: String,
     #[serde(default)]
     launch_at_startup: bool,
+    #[serde(default = "default_task_widget_enabled")]
+    task_widget_enabled: bool,
     #[serde(default = "default_theme")]
     theme: String,
 }
@@ -350,8 +354,31 @@ struct CodexInstance {
     started_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct MonitoredTask {
+    id: String,
+    profile_id: String,
+    profile_name: String,
+    title: String,
+    summary: Option<String>,
+    status: String,
+    waiting_kind: Option<String>,
+    started_at: String,
+    updated_at: String,
+}
+
+#[derive(Clone)]
+struct MonitoredTaskCacheEntry {
+    length: u64,
+    modified: Option<std::time::SystemTime>,
+    tasks: Vec<MonitoredTask>,
+}
+
 static CODEX_INSTANCES: OnceLock<Mutex<Vec<CodexInstance>>> = OnceLock::new();
 static RESOURCE_USAGE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static MONITORED_TASK_CACHE: OnceLock<Mutex<BTreeMap<PathBuf, MonitoredTaskCacheEntry>>> =
+    OnceLock::new();
 
 fn codex_instances() -> &'static Mutex<Vec<CodexInstance>> {
     CODEX_INSTANCES.get_or_init(|| Mutex::new(Vec::new()))
@@ -359,6 +386,10 @@ fn codex_instances() -> &'static Mutex<Vec<CodexInstance>> {
 
 fn resource_usage_lock() -> &'static Mutex<()> {
     RESOURCE_USAGE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn monitored_task_cache() -> &'static Mutex<BTreeMap<PathBuf, MonitoredTaskCacheEntry>> {
+    MONITORED_TASK_CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
 impl Default for AppSettings {
@@ -372,6 +403,7 @@ impl Default for AppSettings {
             proxy_host: String::new(),
             proxy_port: String::new(),
             launch_at_startup: false,
+            task_widget_enabled: true,
             theme: default_theme(),
         }
     }
@@ -811,13 +843,24 @@ fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
         proxy_host: settings.proxy_host.trim().to_string(),
         proxy_port: settings.proxy_port.trim().to_string(),
         launch_at_startup: settings.launch_at_startup,
+        task_widget_enabled: settings.task_widget_enabled,
         theme: settings.theme.trim().to_string(),
     };
-    save_data(&app, &data)
+    save_data(&app, &data)?;
+    if settings.task_widget_enabled {
+        ensure_task_widget(&app)?;
+    } else if let Some(window) = app.get_webview_window("task-widget") {
+        window.destroy().map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn default_theme() -> String {
     "light".to_string()
+}
+
+fn default_task_widget_enabled() -> bool {
+    true
 }
 
 fn validate_theme(theme: &str) -> Result<(), String> {
@@ -1122,16 +1165,40 @@ fn collect_files_with_extension(
     extension: &str,
     files: &mut Vec<PathBuf>,
 ) -> Result<(), String> {
-    if !root.is_dir() {
+    const MAX_SCAN_DEPTH: usize = 16;
+    const MAX_SCAN_FILES: usize = 5_000;
+
+    let Ok(root_metadata) = fs::symlink_metadata(root) else {
+        return Ok(());
+    };
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
         return Ok(());
     }
-    for entry in fs::read_dir(root).map_err(format_io_error)? {
-        let entry = entry.map_err(format_io_error)?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_files_with_extension(&path, extension, files)?;
-        } else if path.extension() == Some(OsStr::new(extension)) {
-            files.push(path);
+    let canonical_root = root.canonicalize().map_err(format_io_error)?;
+    let mut pending = vec![(canonical_root.clone(), 0usize)];
+    let mut visited = BTreeSet::new();
+    while let Some((directory, depth)) = pending.pop() {
+        if depth > MAX_SCAN_DEPTH || !visited.insert(directory.clone()) {
+            continue;
+        }
+        for entry in fs::read_dir(&directory).map_err(format_io_error)? {
+            let entry = entry.map_err(format_io_error)?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(format_io_error)?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                let canonical = path.canonicalize().map_err(format_io_error)?;
+                if canonical.starts_with(&canonical_root) {
+                    pending.push((canonical, depth + 1));
+                }
+            } else if path.extension() == Some(OsStr::new(extension)) {
+                files.push(path);
+                if files.len() >= MAX_SCAN_FILES {
+                    return Ok(());
+                }
+            }
         }
     }
     Ok(())
@@ -1139,10 +1206,409 @@ fn collect_files_with_extension(
 
 fn collect_profile_session_files(profile_home: &Path) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
+    let canonical_home = profile_home.canonicalize().map_err(format_io_error)?;
     for directory in ["sessions", "archived_sessions"] {
-        collect_files_with_extension(&profile_home.join(directory), "jsonl", &mut files)?;
+        let root = profile_home.join(directory);
+        let Ok(metadata) = fs::symlink_metadata(&root) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            continue;
+        }
+        let canonical_root = root.canonicalize().map_err(format_io_error)?;
+        if canonical_root.starts_with(&canonical_home) {
+            collect_files_with_extension(&canonical_root, "jsonl", &mut files)?;
+        }
     }
     Ok(files)
+}
+
+fn task_title(value: &serde_json::Value) -> Option<String> {
+    let text = value
+        .get("payload")
+        .and_then(|payload| payload.get("message"))
+        .and_then(|message| message.as_str())
+        .or_else(|| {
+            value
+                .get("payload")
+                .and_then(|payload| payload.get("content"))
+                .and_then(|content| content.as_array())
+                .and_then(|content| {
+                    content.iter().find_map(|item| {
+                        item.get("text")
+                            .or_else(|| item.get("input_text"))
+                            .and_then(|text| text.as_str())
+                    })
+                })
+        })?;
+    let visible = text
+        .rsplit_once('>')
+        .map(|(_, remainder)| remainder.trim())
+        .filter(|remainder| !remainder.is_empty())
+        .unwrap_or(text);
+    let compact = visible.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        return None;
+    }
+    Some(compact.chars().take(64).collect())
+}
+
+fn looks_like_user_question(text: &str) -> bool {
+    let normalized = text.trim();
+    normalized.ends_with('?')
+        || normalized.ends_with('？')
+        || [
+            "请确认",
+            "请选择",
+            "请回复",
+            "告诉我",
+            "需要你",
+            "是否继续",
+            "是否允许",
+        ]
+        .iter()
+        .any(|marker| normalized.contains(marker))
+}
+
+fn parse_monitored_tasks(path: &Path, profile: &Profile) -> Result<Vec<MonitoredTask>, String> {
+    const SESSION_HEAD_BYTES: u64 = 96 * 1024;
+    const SESSION_TAIL_BYTES: u64 = 192 * 1024;
+    const OBSERVATION_GAP: &str = "__CODEX_SWITCH_HELPER_OBSERVATION_GAP__";
+    let mut file = fs::File::open(path).map_err(format_io_error)?;
+    let length = file.metadata().map_err(format_io_error)?.len();
+    let mut chunks = Vec::new();
+    file.by_ref()
+        .take(SESSION_HEAD_BYTES)
+        .read_to_end(&mut chunks)
+        .map_err(format_io_error)?;
+    if length > SESSION_HEAD_BYTES + SESSION_TAIL_BYTES {
+        chunks.extend_from_slice(format!("\n{OBSERVATION_GAP}\n").as_bytes());
+        file.seek(SeekFrom::Start(length.saturating_sub(SESSION_TAIL_BYTES)))
+            .map_err(format_io_error)?;
+        file.read_to_end(&mut chunks).map_err(format_io_error)?;
+    } else if length > SESSION_HEAD_BYTES {
+        file.seek(SeekFrom::Start(SESSION_HEAD_BYTES))
+            .map_err(format_io_error)?;
+        file.read_to_end(&mut chunks).map_err(format_io_error)?;
+    }
+    let observation = String::from_utf8_lossy(&chunks);
+    let mut title = None;
+    let mut status = "unknown".to_string();
+    let mut started_at = None;
+    let mut updated_at = None;
+    let mut waiting_call = false;
+    let mut waiting_kind = None;
+    let mut last_assistant_text = None;
+    let mut tasks = Vec::new();
+    let mut turn_index = 0usize;
+
+    for line in observation.lines() {
+        if line == OBSERVATION_GAP {
+            if matches!(status.as_str(), "completed" | "failed" | "waiting") {
+                if let Some(task) = build_monitored_task(
+                    path,
+                    profile,
+                    title.take(),
+                    &status,
+                    waiting_kind.take(),
+                    started_at.take(),
+                    updated_at.take(),
+                    turn_index,
+                ) {
+                    tasks.push(task);
+                }
+            }
+            turn_index += 1;
+            title = None;
+            status = "unknown".to_string();
+            started_at = None;
+            updated_at = None;
+            waiting_call = false;
+            waiting_kind = None;
+            last_assistant_text = None;
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let timestamp = value
+            .get("timestamp")
+            .and_then(|item| item.as_str())
+            .map(str::to_string);
+        let event_type = value
+            .get("type")
+            .and_then(|item| item.as_str())
+            .unwrap_or_default();
+        let payload = value.get("payload").unwrap_or(&serde_json::Value::Null);
+        let payload_type = payload
+            .get("type")
+            .and_then(|item| item.as_str())
+            .unwrap_or_default();
+
+        if title.is_none()
+            && ((event_type == "event_msg" && payload_type == "user_message")
+                || (event_type == "response_item"
+                    && payload_type == "message"
+                    && payload.get("role").and_then(|item| item.as_str()) == Some("user")))
+        {
+            title = task_title(&value);
+        }
+        if event_type == "response_item"
+            && payload_type == "message"
+            && payload.get("role").and_then(|item| item.as_str()) == Some("assistant")
+        {
+            last_assistant_text = task_title(&value);
+        }
+
+        match (event_type, payload_type) {
+            ("event_msg", "task_started") => {
+                if let Some(task) = build_monitored_task(
+                    path,
+                    profile,
+                    title.take(),
+                    &status,
+                    waiting_kind.take(),
+                    started_at.take(),
+                    updated_at.take(),
+                    turn_index,
+                ) {
+                    tasks.push(task);
+                }
+                turn_index += 1;
+                status = "running".to_string();
+                waiting_call = false;
+                waiting_kind = None;
+                last_assistant_text = None;
+                started_at = timestamp.clone();
+            }
+            ("event_msg", "task_complete") => {
+                if waiting_call {
+                    status = "waiting".to_string();
+                } else if last_assistant_text
+                    .as_deref()
+                    .is_some_and(looks_like_user_question)
+                {
+                    status = "waiting".to_string();
+                    waiting_kind = Some("reply".to_string());
+                } else {
+                    status = "completed".to_string();
+                    waiting_kind = None;
+                }
+                if status != "waiting" {
+                    waiting_call = false;
+                }
+            }
+            ("event_msg", "turn_aborted" | "error" | "stream_error") => {
+                status = "failed".to_string();
+                waiting_call = false;
+                waiting_kind = None;
+            }
+            ("response_item", "custom_tool_call" | "function_call") => {
+                let name = payload
+                    .get("name")
+                    .and_then(|item| item.as_str())
+                    .unwrap_or_default();
+                if name == "request_user_input" {
+                    status = "waiting".to_string();
+                    waiting_call = true;
+                    waiting_kind = Some("choice".to_string());
+                } else if name.contains("approval") || name.contains("permission") {
+                    status = "waiting".to_string();
+                    waiting_call = true;
+                    waiting_kind = Some("approval".to_string());
+                }
+            }
+            ("response_item", "custom_tool_call_output" | "function_call_output")
+                if waiting_call =>
+            {
+                status = "running".to_string();
+                waiting_call = false;
+                waiting_kind = None;
+            }
+            _ => {}
+        }
+        if timestamp.is_some() {
+            updated_at = timestamp;
+        }
+    }
+
+    if let Some(task) = build_monitored_task(
+        path,
+        profile,
+        title,
+        &status,
+        waiting_kind,
+        started_at,
+        updated_at,
+        turn_index,
+    ) {
+        tasks.push(task);
+    }
+    Ok(tasks)
+}
+
+fn build_monitored_task(
+    path: &Path,
+    profile: &Profile,
+    title: Option<String>,
+    status: &str,
+    waiting_kind: Option<String>,
+    started_at: Option<String>,
+    updated_at: Option<String>,
+    turn_index: usize,
+) -> Option<MonitoredTask> {
+    let updated_at = updated_at?;
+    let started_at = started_at.unwrap_or_else(|| updated_at.clone());
+    let id = path
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .unwrap_or_default()
+        .rsplit('-')
+        .take(5)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("-");
+    Some(MonitoredTask {
+        id: format!("{id}:{turn_index}"),
+        profile_id: profile.id.clone(),
+        profile_name: profile.name.clone(),
+        title: title.unwrap_or_else(|| "未命名 Codex 任务".to_string()),
+        summary: None,
+        status: status.to_string(),
+        waiting_kind,
+        started_at,
+        updated_at,
+    })
+}
+
+fn load_codex_thread_titles(home_path: &Path) -> BTreeMap<String, String> {
+    let database_path = home_path.join("state_5.sqlite");
+    let Ok(connection) = Connection::open_with_flags(
+        database_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return BTreeMap::new();
+    };
+    let columns = connection
+        .prepare("PRAGMA table_info(threads)")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<rusqlite::Result<BTreeSet<_>>>()
+        })
+        .unwrap_or_default();
+    let title_expression = if columns.contains("title") && columns.contains("name") {
+        "COALESCE(NULLIF(title, ''), NULLIF(name, ''))"
+    } else if columns.contains("title") {
+        "NULLIF(title, '')"
+    } else if columns.contains("name") {
+        "NULLIF(name, '')"
+    } else {
+        return BTreeMap::new();
+    };
+    let query = format!("SELECT id, {title_expression} FROM threads");
+    let Ok(mut statement) = connection.prepare(&query) else {
+        return BTreeMap::new();
+    };
+    let Ok(rows) = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+    }) else {
+        return BTreeMap::new();
+    };
+
+    rows.filter_map(Result::ok)
+        .filter_map(|(id, title)| title.map(|title| (id, title)))
+        .collect()
+}
+
+#[tauri::command]
+async fn list_monitored_tasks(app: AppHandle) -> Result<Vec<MonitoredTask>, String> {
+    tauri::async_runtime::spawn_blocking(move || list_monitored_tasks_blocking(app))
+        .await
+        .map_err(|error| format!("任务状态扫描失败：{error}"))?
+}
+
+fn list_monitored_tasks_blocking(app: AppHandle) -> Result<Vec<MonitoredTask>, String> {
+    let data = load_data(&app)?;
+    let mut tasks = Vec::new();
+    let mut current_paths = BTreeSet::new();
+    let mut cache = monitored_task_cache()
+        .lock()
+        .map_err(|_| "任务监控缓存锁已损坏。".to_string())?;
+    for profile in data.profiles.iter().filter(|profile| profile.managed) {
+        let thread_titles = load_codex_thread_titles(Path::new(&profile.home_path));
+        let mut files = collect_profile_session_files(Path::new(&profile.home_path))?;
+        files.sort_by_key(|path| fs::metadata(path).and_then(|meta| meta.modified()).ok());
+        for path in files.into_iter().rev().take(30) {
+            current_paths.insert(path.clone());
+            let metadata = fs::metadata(&path).map_err(format_io_error)?;
+            let length = metadata.len();
+            let modified = metadata.modified().ok();
+            let cached = cache
+                .get(&path)
+                .filter(|entry| entry.length == length && entry.modified == modified);
+            let mut parsed_tasks = if let Some(entry) = cached {
+                entry.tasks.clone()
+            } else {
+                let parsed_tasks = parse_monitored_tasks(&path, profile)?;
+                cache.insert(
+                    path.clone(),
+                    MonitoredTaskCacheEntry {
+                        length,
+                        modified,
+                        tasks: parsed_tasks.clone(),
+                    },
+                );
+                parsed_tasks
+            };
+            for task in &mut parsed_tasks {
+                let thread_id = task.id.split(':').next().unwrap_or_default();
+                if let Some(thread_title) = thread_titles.get(thread_id) {
+                    if task.title != *thread_title {
+                        task.summary =
+                            Some(std::mem::replace(&mut task.title, thread_title.clone()));
+                    }
+                }
+            }
+            tasks.extend(parsed_tasks);
+        }
+    }
+    cache.retain(|path, _| current_paths.contains(path));
+    let retention_cutoff = Utc::now() - chrono::Duration::hours(24);
+    tasks.retain(|task| {
+        DateTime::parse_from_rfc3339(&task.started_at)
+            .map(|started_at| started_at.with_timezone(&Utc) >= retention_cutoff)
+            .unwrap_or(false)
+    });
+    tasks.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    tasks.truncate(40);
+    Ok(tasks)
+}
+
+#[tauri::command]
+fn show_task_owner(app: AppHandle, profile_id: String) -> Result<bool, String> {
+    let pid = codex_instances()
+        .lock()
+        .map_err(|_| "实例状态锁已损坏。".to_string())?
+        .iter()
+        .rev()
+        .find(|instance| instance.profile_id == profile_id && process_running(instance.pid))
+        .map(|instance| instance.pid);
+    if let Some(pid) = pid {
+        let script =
+            format!("exit [int](-not (New-Object -ComObject WScript.Shell).AppActivate({pid}))");
+        let status = hidden_command("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .status()
+            .map_err(format_io_error)?;
+        if status.success() {
+            return Ok(true);
+        }
+    }
+    show_main_window(&app);
+    Ok(false)
 }
 
 fn plugin_usage_aliases(plugin_root: &Path, plugin_name: &str) -> BTreeSet<String> {
@@ -4107,6 +4573,256 @@ enabled = true
     }
 
     #[test]
+    fn task_monitor_recognizes_completion_and_waiting_reply() {
+        let root = env::temp_dir().join(format!("codex-task-monitor-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let session = root.join("rollout-2026-08-05-test-session.jsonl");
+        let profile = account_profile(&root);
+        fs::write(
+            &session,
+            concat!(
+                r#"{"timestamp":"2026-08-05T01:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-08-05T01:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"修复登录问题"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-08-05T01:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"请选择继续方式？"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-08-05T01:00:03Z","type":"event_msg","payload":{"type":"task_complete"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let task = parse_monitored_tasks(&session, &profile)
+            .unwrap()
+            .into_iter()
+            .last()
+            .unwrap();
+        assert_eq!(task.title, "修复登录问题");
+        assert_eq!(task.status, "waiting");
+        assert_eq!(task.waiting_kind.as_deref(), Some("reply"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn task_monitor_title_ignores_injected_context_tags() {
+        let value = serde_json::json!({
+            "payload": {
+                "message": "<recommended_plugins>many entries</recommended_plugins>\n修复桌面挂件拖动"
+            }
+        });
+        assert_eq!(task_title(&value).as_deref(), Some("修复桌面挂件拖动"));
+    }
+
+    #[test]
+    fn task_monitor_reads_the_official_codex_thread_title() {
+        let root = env::temp_dir().join(format!("codex-task-title-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let connection = Connection::open(root.join("state_5.sqlite")).unwrap();
+        connection
+            .execute(
+                "CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT, name TEXT)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads (id, title) VALUES (?1, ?2)",
+                (
+                    "019fd009-4820-7b60-a2e5-87b2e73409ad",
+                    "评估项目能力与功能范围",
+                ),
+            )
+            .unwrap();
+        drop(connection);
+
+        let titles = load_codex_thread_titles(&root);
+
+        assert_eq!(
+            titles
+                .get("019fd009-4820-7b60-a2e5-87b2e73409ad")
+                .map(String::as_str),
+            Some("评估项目能力与功能范围")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn task_monitor_reads_thread_title_without_legacy_name_column() {
+        let root = env::temp_dir().join(format!("codex-task-title-legacy-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let connection = Connection::open(root.join("state_5.sqlite")).unwrap();
+        connection
+            .execute("CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT)", [])
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads (id, title) VALUES (?1, ?2)",
+                ("legacy-thread", "旧版数据库会话名称"),
+            )
+            .unwrap();
+        drop(connection);
+
+        assert_eq!(
+            load_codex_thread_titles(&root).get("legacy-thread"),
+            Some(&"旧版数据库会话名称".to_string())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn task_monitor_splits_session_turns_and_uses_each_user_message() {
+        let root = env::temp_dir().join(format!("codex-task-monitor-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let session = root.join("rollout-2026-08-05-multiple-turns.jsonl");
+        let profile = account_profile(&root);
+        fs::write(
+            &session,
+            concat!(
+                r#"{"timestamp":"2026-08-05T01:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-08-05T01:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"修复登录"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-08-05T01:00:02Z","type":"event_msg","payload":{"type":"task_complete"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-08-05T02:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-08-05T02:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"更新文档"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let tasks = parse_monitored_tasks(&session, &profile).unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].title, "修复登录");
+        assert_eq!(tasks[1].title, "更新文档");
+        assert_ne!(tasks[0].id, tasks[1].id);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn task_monitor_drops_unverifiable_running_turn_across_observation_gap() {
+        let root = env::temp_dir().join(format!("codex-task-monitor-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let session = root.join("rollout-2026-08-05-large-session.jsonl");
+        let profile = account_profile(&root);
+        let mut content = concat!(
+            r#"{"timestamp":"2026-08-05T01:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-05T01:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"不应保留的旧任务"}}"#,
+            "\n"
+        )
+        .to_string();
+        content.push_str(&"x".repeat(320 * 1024));
+        content.push('\n');
+        content.push_str(concat!(
+            r#"{"timestamp":"2026-08-05T02:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-05T02:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"当前任务"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-05T02:00:02Z","type":"event_msg","payload":{"type":"task_complete"}}"#,
+            "\n"
+        ));
+        fs::write(&session, content).unwrap();
+
+        let tasks = parse_monitored_tasks(&session, &profile).unwrap();
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "当前任务");
+        assert_eq!(tasks[0].status, "completed");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn task_monitor_recognizes_explicit_choice_request() {
+        let root = env::temp_dir().join(format!("codex-task-monitor-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let session = root.join("rollout-2026-08-05-choice-session.jsonl");
+        let profile = account_profile(&root);
+        fs::write(
+            &session,
+            concat!(
+                r#"{"timestamp":"2026-08-05T01:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-08-05T01:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","name":"request_user_input"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let task = parse_monitored_tasks(&session, &profile)
+            .unwrap()
+            .into_iter()
+            .last()
+            .unwrap();
+        assert_eq!(task.status, "waiting");
+        assert_eq!(task.waiting_kind.as_deref(), Some("choice"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn task_monitor_recognizes_approval_and_resumes_on_next_turn() {
+        let root = env::temp_dir().join(format!("codex-task-monitor-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let session = root.join("rollout-2026-08-05-approval-session.jsonl");
+        let profile = account_profile(&root);
+        fs::write(
+            &session,
+            concat!(
+                r#"{"timestamp":"2026-08-05T01:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-08-05T01:00:01Z","type":"response_item","payload":{"type":"function_call","name":"request_approval"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let waiting = parse_monitored_tasks(&session, &profile)
+            .unwrap()
+            .into_iter()
+            .last()
+            .unwrap();
+        assert_eq!(waiting.status, "waiting");
+        assert_eq!(waiting.waiting_kind.as_deref(), Some("approval"));
+
+        let mut file = fs::OpenOptions::new().append(true).open(&session).unwrap();
+        use std::io::Write;
+        writeln!(file, r#"{{"timestamp":"2026-08-05T01:00:02Z","type":"event_msg","payload":{{"type":"task_started"}}}}"#).unwrap();
+        let resumed = parse_monitored_tasks(&session, &profile)
+            .unwrap()
+            .into_iter()
+            .last()
+            .unwrap();
+        assert_eq!(resumed.status, "running");
+        assert_eq!(resumed.waiting_kind, None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn task_monitor_recognizes_failed_turn() {
+        let root = env::temp_dir().join(format!("codex-task-monitor-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let session = root.join("rollout-2026-08-05-failed-session.jsonl");
+        let profile = account_profile(&root);
+        fs::write(
+            &session,
+            concat!(
+                r#"{"timestamp":"2026-08-05T01:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-08-05T01:00:01Z","type":"event_msg","payload":{"type":"stream_error"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let task = parse_monitored_tasks(&session, &profile)
+            .unwrap()
+            .into_iter()
+            .last()
+            .unwrap();
+        assert_eq!(task.status, "failed");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn directory_replacement_keeps_complete_new_content() {
         let root = env::temp_dir().join(format!("codex-resource-test-{}", Uuid::new_v4()));
         let source = root.join("source");
@@ -4133,18 +4849,29 @@ enabled = true
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
+            let toggle_widget = MenuItem::with_id(
+                app,
+                "toggle-widget",
+                "显示/隐藏任务挂件",
+                true,
+                None::<&str>,
+            )?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &toggle_widget, &quit])?;
             let mut tray = TrayIconBuilder::new()
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .tooltip("Codex Switch Helper")
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main_window(app),
+                    "toggle-widget" => {
+                        let _ = toggle_task_widget_visibility(app);
+                    }
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -4164,6 +4891,13 @@ fn main() {
                 tray = tray.icon(icon.clone());
             }
             tray.build(app)?;
+            if load_data(app.handle())
+                .map_err(io::Error::other)?
+                .settings
+                .task_widget_enabled
+            {
+                ensure_task_widget(app.handle()).map_err(io::Error::other)?;
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -4186,6 +4920,9 @@ fn main() {
             test_proxy_connection,
             launch_codex,
             list_codex_instances,
+            list_monitored_tasks,
+            show_task_owner,
+            hide_task_widget,
             stop_codex_instance,
             reveal_profile_folder,
             save_settings,
@@ -4213,4 +4950,54 @@ fn show_main_window(app: &AppHandle) {
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+}
+
+fn ensure_task_widget(app: &AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("task-widget") {
+        window.show().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(
+        app,
+        "task-widget",
+        WebviewUrl::App("index.html?widget=1".into()),
+    )
+    .initialization_script(
+        "document.documentElement.dataset.surface='task-widget';document.documentElement.style.background='transparent';",
+    )
+    .title("Codex 任务")
+    .inner_size(56.0, 56.0)
+    .min_inner_size(56.0, 56.0)
+    .position(24.0, 24.0)
+    .decorations(false)
+    .transparent(true)
+    .background_color(tauri::webview::Color(0, 0, 0, 0))
+    .shadow(false)
+    .always_on_top(true)
+    .resizable(true)
+    .skip_taskbar(true)
+    .build()
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn toggle_task_widget_visibility(app: &AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("task-widget") {
+        if window.is_visible().map_err(|error| error.to_string())? {
+            window.hide().map_err(|error| error.to_string())?;
+        } else {
+            window.show().map_err(|error| error.to_string())?;
+            window.set_focus().map_err(|error| error.to_string())?;
+        }
+        return Ok(());
+    }
+    ensure_task_widget(app)
+}
+
+#[tauri::command]
+fn hide_task_widget(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("task-widget") {
+        window.hide().map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }

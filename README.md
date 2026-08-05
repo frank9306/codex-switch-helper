@@ -19,6 +19,7 @@ Tauri desktop helper for switching Codex App profiles on Windows.
 - Supports HTTP and SOCKS5 proxy settings for the helper app and Codex launches.
 - Runs multiple isolated Codex instances in parallel.
 - Keeps the helper responsive during active Codex tasks by performing Profile inspection, launch preparation, and process checks outside the UI event thread.
+- Provides a draggable task widget that distinguishes running, waiting-for-input, and recently completed Codex tasks, brings the owning Codex Profile forward, and sends completion notifications.
 - Provides protective confirmation dialogs for dangerous actions such as deleting Profiles or changing user-level environment variables.
 - Launches Profile instances through the packaged Codex desktop entry point and default instances through `shell:AppsFolder`.
 - Can restore default Codex Home behavior by deleting user-level `CODEX_HOME`.
@@ -124,4 +125,4 @@ npm run tauri:build
 
 Also update `CHANGELOG.md`, `README.md`, and `README.zh-CN.md` before tagging a release.
 
-Current release: `0.2.13`.
+Current release: `0.2.14`.

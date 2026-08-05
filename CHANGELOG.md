@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.14 - 2026-08-05
+
+- Added a draggable task widget that tracks running, waiting-for-input, and recently completed Codex tasks across managed Profiles.
+- Added desktop notifications for newly completed tasks and one-click activation of the owning Codex Profile from the expanded widget.
+- Added a compact 56×56 robot bubble with state-specific colours, motion, transparent edges, automatic refresh, and a convenient in-widget collapse control.
+
 ## 0.2.13 - 2026-08-05
 
 - Fixed Skills and plugin usage counts so repeated use in separate task turns is counted separately while duplicate evidence within one turn is still deduplicated.

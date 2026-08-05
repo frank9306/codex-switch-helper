@@ -5,6 +5,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { relaunch } from '@tauri-apps/plugin-process'
 import { check } from '@tauri-apps/plugin-updater'
+import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification'
+import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
 import './style.css'
 
 type AuthMode = 'account' | 'apiKey'
@@ -91,6 +93,7 @@ type AppSettings = {
   proxyHost: string
   proxyPort: string
   launchAtStartup: boolean
+  taskWidgetEnabled: boolean
   theme: Theme
 }
 
@@ -207,6 +210,210 @@ type CodexInstance = {
   startedAt: string
 }
 
+type TaskStatus = 'running' | 'waiting' | 'completed' | 'failed' | 'unknown'
+
+type MonitoredTask = {
+  id: string
+  profileId: string
+  profileName: string
+  title: string
+  summary?: string
+  status: TaskStatus
+  waitingKind?: 'choice' | 'reply' | 'approval'
+  startedAt: string
+  updatedAt: string
+}
+
+const TASK_STATUS_LABEL: Record<TaskStatus, string> = {
+  running: '运行中',
+  waiting: '等待处理',
+  completed: '已完成',
+  failed: '执行失败',
+  unknown: '状态未知',
+}
+
+const WAITING_KIND_LABEL = {
+  choice: '等待选择',
+  reply: '等待回复',
+  approval: '等待授权',
+} as const
+
+function taskStatusLabel(task: MonitoredTask) {
+  return task.status === 'waiting' && task.waitingKind ? WAITING_KIND_LABEL[task.waitingKind] : TASK_STATUS_LABEL[task.status]
+}
+
+function taskStatusIcon(status: TaskStatus) {
+  if (status === 'completed') return '✓'
+  if (status === 'failed') return '!'
+  if (status === 'waiting') return '…'
+  return '↻'
+}
+
+function elapsed(startedAt: string) {
+  const seconds = Math.max(0, Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000))
+  if (seconds < 60) return `${seconds} 秒`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes} 分钟`
+  return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分钟`
+}
+
+function TaskWidget() {
+  const [tasks, setTasks] = useState<MonitoredTask[]>([])
+  const [collapsed, setCollapsed] = useState(localStorage.getItem('task-widget-collapsed') === 'true')
+  const [now, setNow] = useState(Date.now())
+  const [loaded, setLoaded] = useState(false)
+  const [showAllRecent, setShowAllRecent] = useState(false)
+  const initialized = useRef(false)
+
+  useEffect(() => {
+    document.documentElement.dataset.surface = 'task-widget'
+    invoke<AppState>('get_app_state')
+      .then((appState) => { document.documentElement.dataset.theme = appState.settings.theme || 'light' })
+      .catch(() => undefined)
+    let cancelled = false
+    let refreshTimer = 0
+    async function refresh() {
+      try {
+        const next = await invoke<MonitoredTask[]>('list_monitored_tasks')
+        if (cancelled) return
+        setTasks(next)
+        setLoaded(true)
+        const previous = JSON.parse(localStorage.getItem('task-widget-statuses') || '{}') as Record<string, TaskStatus>
+        if (initialized.current) {
+          let granted = await isPermissionGranted()
+          if (!granted) granted = (await requestPermission()) === 'granted'
+          if (granted) {
+            for (const task of next) {
+              if (previous[task.id] === task.status) continue
+              if (task.status === 'completed' || task.status === 'failed' || task.status === 'waiting') {
+                sendNotification({
+                  title: task.status === 'completed' ? 'Codex 任务已完成' : task.status === 'failed' ? 'Codex 任务执行失败' : `Codex 任务${taskStatusLabel(task)}`,
+                  body: `${task.title} · ${task.profileName}`,
+                })
+              }
+            }
+          }
+        }
+        localStorage.setItem('task-widget-statuses', JSON.stringify(Object.fromEntries(next.map((task) => [task.id, task.status]))))
+        initialized.current = true
+      } catch {
+        // Keep the last known list when a profile log is temporarily unavailable.
+      } finally {
+        if (!cancelled) refreshTimer = window.setTimeout(refresh, 8000)
+      }
+    }
+    refresh()
+    const clockTimer = window.setInterval(() => setNow(Date.now()), 30_000)
+    return () => {
+      cancelled = true
+      window.clearTimeout(refreshTimer)
+      window.clearInterval(clockTimer)
+    }
+  }, [])
+
+  useEffect(() => {
+    localStorage.setItem('task-widget-collapsed', String(collapsed))
+    getCurrentWindow().setSize(new LogicalSize(collapsed ? 56 : 336, collapsed ? 56 : showAllRecent ? 700 : 600)).catch(() => undefined)
+  }, [collapsed, showAllRecent])
+
+  const active = tasks.filter((task) => task.status === 'running' || task.status === 'waiting')
+  const allRecent = tasks.filter((task) => task.status === 'completed' || task.status === 'failed')
+  const recent = allRecent.slice(0, showAllRecent ? 12 : 3)
+  const waitingCount = active.filter((task) => task.status === 'waiting').length
+  const robotState = waitingCount ? 'waiting' : active.length ? 'running' : 'idle'
+  const robotCount = waitingCount || active.length
+  const robotLabel = waitingCount ? '等待输入' : active.length ? '运行中' : '当前空闲'
+  void now
+
+  if (collapsed) {
+    return (
+      <div
+        className={`task-robot-bubble ${robotState}`}
+        title={`${robotLabel}${robotCount ? ` · ${robotCount}` : ''}`}
+        onMouseDown={(event) => {
+          if (event.button === 0 && !(event.target as HTMLElement).closest('button')) getCurrentWindow().startDragging().catch(() => undefined)
+        }}
+      >
+        <span className="task-robot-bubble-ring" aria-hidden="true" />
+        <span className="task-robot-bubble-shell">
+          <i className="task-robot-bubble-grip" />
+          <i className="task-robot-bubble-antenna" />
+          <button className="task-robot-bubble-face" type="button" aria-label={`${robotLabel}${robotCount ? `，${robotCount} 项` : ''}，展开任务列表`} onClick={() => setCollapsed(false)}><i /><i /></button>
+          <b>{robotCount || '✓'}</b>
+        </span>
+      </div>
+    )
+  }
+
+  const robot = (
+    <div
+      className={`task-robot ${robotState}`}
+      onMouseDown={(event) => {
+        if (event.button === 0 && !(event.target as HTMLElement).closest('button')) getCurrentWindow().startDragging().catch(() => undefined)
+      }}
+    >
+      <span className="task-robot-orbit" aria-hidden="true" />
+      <span className="task-robot-antenna" aria-hidden="true"><i /></span>
+      <div className="task-robot-shell">
+        <span className="task-robot-grip" aria-label="按住机器人拖动">{Array.from({ length: 6 }, (_, index) => <i key={index} />)}</span>
+        <span className="task-robot-side" aria-hidden="true" />
+        <div className="task-robot-face" aria-hidden="true">
+          <span className="task-robot-eye left" />
+          <span className="task-robot-eye right" />
+          {robotState === 'running' && <span className="task-robot-runner"><i /></span>}
+        </div>
+        {robotState === 'idle' && <span className="task-robot-check" aria-hidden="true">✓</span>}
+        <div className="task-robot-status"><strong>{robotLabel}</strong>{robotCount > 0 && <b>{robotCount}</b>}</div>
+        <button className="task-robot-toggle" type="button" aria-label={collapsed ? '展开任务列表' : '收起任务列表'} onClick={() => setCollapsed((value) => !value)}>{collapsed ? '⌄' : '⌃'}</button>
+      </div>
+    </div>
+  )
+
+  return (
+    <main className={`task-widget-stage ${collapsed ? 'collapsed' : 'expanded'} ${robotState}`}>
+      {robot}
+      {!collapsed && <span className="task-robot-connector" aria-hidden="true" />}
+      {!collapsed && (
+        <div className="task-widget-panel">
+          <header className="task-widget-panel-header">
+            <strong>任务列表</strong>
+            <div><span aria-hidden="true">☷</span><button type="button" aria-label="隐藏任务挂件" title="隐藏，可从系统托盘重新显示" onClick={() => invoke('hide_task_widget')}>×</button></div>
+          </header>
+          <div className="task-widget-body">
+          <section>
+            {!loaded && <p className="task-widget-empty">正在读取任务状态...</p>}
+            {loaded && active.length === 0 && <div className="task-widget-empty-state"><span>✓</span><strong>当前没有任务</strong><small>一切已完成，继续保持！</small></div>}
+            {active.map((task) => (
+              <button className={`task-widget-row ${task.status}`} type="button" key={task.id} onClick={() => invoke('show_task_owner', { profileId: task.profileId })}>
+                <span className={`task-status-dot ${task.status}`} aria-hidden="true"><span>{taskStatusIcon(task.status)}</span></span>
+                <span className="task-widget-copy"><strong>{task.title}</strong>{task.summary && <small className="task-widget-summary">{task.summary}</small>}<small>{task.profileName} · {elapsed(task.startedAt)}</small></span>
+                <em>{taskStatusLabel(task)}</em>
+              </button>
+            ))}
+          </section>
+          {recent.length > 0 && <section className="task-widget-recent">
+            <h2><span>最近结束</span><b>{recent.length}</b></h2>
+            {recent.map((task) => (
+              <button className={`task-widget-row ${task.status}`} type="button" key={task.id} onClick={() => invoke('show_task_owner', { profileId: task.profileId })}>
+                <span className={`task-status-dot ${task.status}`} aria-hidden="true"><span>{taskStatusIcon(task.status)}</span></span>
+                <span className="task-widget-copy"><strong>{task.title}</strong>{task.summary && <small className="task-widget-summary">{task.summary}</small>}<small>{task.profileName} · {new Date(task.updatedAt).toLocaleTimeString()}</small></span>
+                <em>{taskStatusLabel(task)}</em>
+              </button>
+            ))}
+            {allRecent.length > 3 && (
+              <button className="task-widget-more" type="button" onClick={() => setShowAllRecent((value) => !value)}>
+                {showAllRecent ? '收起' : `查看全部 ${allRecent.length}`}
+              </button>
+            )}
+          </section>}
+          </div>
+          <footer className="task-widget-panel-footer"><strong>{waitingCount ? `共 ${waitingCount} 项待处理` : active.length ? `共 ${active.length} 项进行中` : '已完成所有任务'}</strong><span>全部任务 ›</span></footer>
+        </div>
+      )}
+    </main>
+  )
+}
+
 function NoticeToast({ notice, onDismiss }: { notice: Notice; onDismiss: (id: number) => void }) {
   useEffect(() => {
     if (!notice.duration) return
@@ -247,6 +454,7 @@ function App() {
   const [proxyHost, setProxyHost] = useState('')
   const [proxyPort, setProxyPort] = useState('')
   const [launchAtStartup, setLaunchAtStartup] = useState(false)
+  const [taskWidgetEnabled, setTaskWidgetEnabled] = useState(true)
   const [theme, setTheme] = useState<Theme>('light')
   const [detectedCodexAppId, setDetectedCodexAppId] = useState<string | null>(null)
   const [notices, setNotices] = useState<Notice[]>([])
@@ -295,6 +503,7 @@ function App() {
     setProxyHost(nextState.settings.proxyHost || '')
     setProxyPort(nextState.settings.proxyPort || '')
     setLaunchAtStartup(Boolean(nextState.settings.launchAtStartup))
+    setTaskWidgetEnabled(nextState.settings.taskWidgetEnabled !== false)
     setTheme(nextState.settings.theme || 'light')
     setSelectedProfileId((current) => current || nextState.activeProfileId || nextState.profiles[0]?.id || '')
     return nextState
@@ -650,6 +859,7 @@ function App() {
           ? [`本程序立即使用代理：${proxyProtocol}://${proxyHost}:${proxyPort}`, '后续 Codex 实例使用此代理']
           : ['本程序立即停止使用代理', '后续 Codex 实例不注入代理']),
         launchAtStartup ? '启用登录 Windows 后自动启动' : '关闭登录 Windows 后自动启动',
+        taskWidgetEnabled ? '启用任务挂件' : '关闭任务挂件',
         `界面主题：${theme === 'dark' ? 'Dark' : 'Light'}`,
       ],
       onConfirm: async () => {
@@ -664,6 +874,7 @@ function App() {
               proxyHost,
               proxyPort,
               launchAtStartup,
+              taskWidgetEnabled,
               theme,
             },
           })
@@ -1135,6 +1346,10 @@ function App() {
               <label className="toggle-row settings-toggle">
                 <input type="checkbox" checked={launchAtStartup} onChange={(event) => setLaunchAtStartup(event.target.checked)} />
                 <span>登录 Windows 后自动启动</span>
+              </label>
+              <label className="toggle-row settings-toggle">
+                <input type="checkbox" checked={taskWidgetEnabled} onChange={(event) => setTaskWidgetEnabled(event.target.checked)} />
+                <span>启用任务挂件</span>
               </label>
               <div className="field-block">
                 <span>界面主题</span>
@@ -1792,6 +2007,6 @@ function ProfileDetail(props: {
 
 createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <App />
+    {new URLSearchParams(window.location.search).has('widget') ? <TaskWidget /> : <App />}
   </React.StrictMode>,
 )
