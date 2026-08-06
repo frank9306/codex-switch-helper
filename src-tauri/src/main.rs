@@ -848,7 +848,7 @@ fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
     };
     save_data(&app, &data)?;
     if settings.task_widget_enabled {
-        ensure_task_widget(&app)?;
+        ensure_task_widget(&app, true)?;
     } else if let Some(window) = app.get_webview_window("task-widget") {
         window.destroy().map_err(|error| error.to_string())?;
     }
@@ -4896,7 +4896,7 @@ fn main() {
                 .settings
                 .task_widget_enabled
             {
-                ensure_task_widget(app.handle()).map_err(io::Error::other)?;
+                ensure_task_widget(app.handle(), false).map_err(io::Error::other)?;
             }
             Ok(())
         })
@@ -4952,9 +4952,13 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
-fn ensure_task_widget(app: &AppHandle) -> Result<(), String> {
+fn ensure_task_widget(app: &AppHandle, visible: bool) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("task-widget") {
-        window.show().map_err(|error| error.to_string())?;
+        if visible {
+            window.show().map_err(|error| error.to_string())?;
+        } else {
+            window.hide().map_err(|error| error.to_string())?;
+        }
         return Ok(());
     }
     WebviewWindowBuilder::new(
@@ -4976,6 +4980,7 @@ fn ensure_task_widget(app: &AppHandle) -> Result<(), String> {
     .always_on_top(true)
     .resizable(true)
     .skip_taskbar(true)
+    .visible(visible)
     .build()
     .map_err(|error| error.to_string())?;
     Ok(())
@@ -4991,7 +4996,7 @@ fn toggle_task_widget_visibility(app: &AppHandle) -> Result<(), String> {
         }
         return Ok(());
     }
-    ensure_task_widget(app)
+    ensure_task_widget(app, true)
 }
 
 #[tauri::command]

@@ -262,6 +262,7 @@ function TaskWidget() {
   const [collapsed, setCollapsed] = useState(localStorage.getItem('task-widget-collapsed') === 'true')
   const [now, setNow] = useState(Date.now())
   const [loaded, setLoaded] = useState(false)
+  const [loadFailed, setLoadFailed] = useState(false)
   const [showAllRecent, setShowAllRecent] = useState(false)
   const initialized = useRef(false)
 
@@ -278,6 +279,7 @@ function TaskWidget() {
         if (cancelled) return
         setTasks(next)
         setLoaded(true)
+        setLoadFailed(false)
         const previous = JSON.parse(localStorage.getItem('task-widget-statuses') || '{}') as Record<string, TaskStatus>
         if (initialized.current) {
           let granted = await isPermissionGranted()
@@ -298,6 +300,7 @@ function TaskWidget() {
         initialized.current = true
       } catch {
         // Keep the last known list when a profile log is temporarily unavailable.
+        if (!cancelled) setLoadFailed(true)
       } finally {
         if (!cancelled) refreshTimer = window.setTimeout(refresh, 8000)
       }
@@ -313,7 +316,7 @@ function TaskWidget() {
 
   useEffect(() => {
     localStorage.setItem('task-widget-collapsed', String(collapsed))
-    getCurrentWindow().setSize(new LogicalSize(collapsed ? 56 : 336, collapsed ? 56 : showAllRecent ? 700 : 600)).catch(() => undefined)
+    getCurrentWindow().setSize(new LogicalSize(collapsed ? 56 : 336, collapsed ? 56 : showAllRecent ? 680 : 560)).catch(() => undefined)
   }, [collapsed, showAllRecent])
 
   const active = tasks.filter((task) => task.status === 'running' || task.status === 'waiting')
@@ -355,7 +358,7 @@ function TaskWidget() {
       <span className="task-robot-orbit" aria-hidden="true" />
       <span className="task-robot-antenna" aria-hidden="true"><i /></span>
       <div className="task-robot-shell">
-        <span className="task-robot-grip" aria-label="按住机器人拖动">{Array.from({ length: 6 }, (_, index) => <i key={index} />)}</span>
+        <span className="task-robot-grip" aria-hidden="true">{Array.from({ length: 6 }, (_, index) => <i key={index} />)}</span>
         <span className="task-robot-side" aria-hidden="true" />
         <div className="task-robot-face" aria-hidden="true">
           <span className="task-robot-eye left" />
@@ -377,14 +380,16 @@ function TaskWidget() {
         <div className="task-widget-panel">
           <header className="task-widget-panel-header">
             <strong>任务列表</strong>
-            <div><span aria-hidden="true">☷</span><button type="button" aria-label="隐藏任务挂件" title="隐藏，可从系统托盘重新显示" onClick={() => invoke('hide_task_widget')}>×</button></div>
+            <button type="button" aria-label="隐藏任务挂件" title="隐藏，可从系统托盘重新显示" onClick={() => invoke('hide_task_widget')}>×</button>
           </header>
           <div className="task-widget-body">
           <section>
-            {!loaded && <p className="task-widget-empty">正在读取任务状态...</p>}
-            {loaded && active.length === 0 && <div className="task-widget-empty-state"><span>✓</span><strong>当前没有任务</strong><small>一切已完成，继续保持！</small></div>}
+            {!loaded && !loadFailed && <p className="task-widget-empty" role="status">正在读取任务状态...</p>}
+            {!loaded && loadFailed && <p className="task-widget-empty error" role="alert">暂时无法读取任务状态，正在自动重试。</p>}
+            {loaded && active.length === 0 && recent.length === 0 && <div className="task-widget-empty-state"><span>✓</span><strong>当前没有任务</strong><small>一切已完成，继续保持！</small></div>}
+            {loaded && active.length === 0 && recent.length > 0 && <p className="task-widget-empty calm"><span aria-hidden="true">✓</span> 当前没有进行中的任务</p>}
             {active.map((task) => (
-              <button className={`task-widget-row ${task.status}`} type="button" key={task.id} onClick={() => invoke('show_task_owner', { profileId: task.profileId })}>
+              <button className={`task-widget-row ${task.status}`} type="button" key={task.id} title={task.title} onClick={() => invoke('show_task_owner', { profileId: task.profileId })}>
                 <span className={`task-status-dot ${task.status}`} aria-hidden="true"><span>{taskStatusIcon(task.status)}</span></span>
                 <span className="task-widget-copy"><strong>{task.title}</strong>{task.summary && <small className="task-widget-summary">{task.summary}</small>}<small>{task.profileName} · {elapsed(task.startedAt)}</small></span>
                 <em>{taskStatusLabel(task)}</em>
@@ -394,20 +399,22 @@ function TaskWidget() {
           {recent.length > 0 && <section className="task-widget-recent">
             <h2><span>最近结束</span><b>{recent.length}</b></h2>
             {recent.map((task) => (
-              <button className={`task-widget-row ${task.status}`} type="button" key={task.id} onClick={() => invoke('show_task_owner', { profileId: task.profileId })}>
+              <button className={`task-widget-row ${task.status}`} type="button" key={task.id} title={task.title} onClick={() => invoke('show_task_owner', { profileId: task.profileId })}>
                 <span className={`task-status-dot ${task.status}`} aria-hidden="true"><span>{taskStatusIcon(task.status)}</span></span>
                 <span className="task-widget-copy"><strong>{task.title}</strong>{task.summary && <small className="task-widget-summary">{task.summary}</small>}<small>{task.profileName} · {new Date(task.updatedAt).toLocaleTimeString()}</small></span>
                 <em>{taskStatusLabel(task)}</em>
               </button>
             ))}
+          </section>}
+          </div>
+          <footer className="task-widget-panel-footer">
+            <strong>{waitingCount ? `共 ${waitingCount} 项待处理` : active.length ? `共 ${active.length} 项进行中` : '已完成所有任务'}</strong>
             {allRecent.length > 3 && (
               <button className="task-widget-more" type="button" onClick={() => setShowAllRecent((value) => !value)}>
                 {showAllRecent ? '收起' : `查看全部 ${allRecent.length}`}
               </button>
             )}
-          </section>}
-          </div>
-          <footer className="task-widget-panel-footer"><strong>{waitingCount ? `共 ${waitingCount} 项待处理` : active.length ? `共 ${active.length} 项进行中` : '已完成所有任务'}</strong><span>全部任务 ›</span></footer>
+          </footer>
         </div>
       )}
     </main>

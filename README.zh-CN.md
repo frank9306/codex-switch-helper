@@ -19,7 +19,7 @@
 - 支持为本工具和 Codex 启动配置 HTTP / SOCKS5 代理。
 - 支持同时启动和停止多个独立 Codex 实例。
 - Profile 检查、启动准备和进程状态查询不会占用 UI 事件线程，Codex 运行任务时切换工具仍可保持响应。
-- 提供可拖动的任务挂件，区分运行中、等待输入和最近完成的 Codex 任务，可唤醒所属 Codex Profile 并在任务完成后发送通知。
+- 提供可拖动的透明任务挂件，包含紧凑的 56×56 机器人气泡和重新整理的展开任务列表；它可区分运行中、等待输入和最近完成的 Codex 任务，唤醒所属 Codex Profile，并在任务完成后发送通知。
 - 删除 Profile、修改用户级环境变量等危险操作会显示保护性确认弹窗。
 - Profile 实例通过安装包声明的 Codex 桌面入口启动，默认实例仍通过 `shell:AppsFolder` 启动。
 - 可以删除用户级 `CODEX_HOME`，恢复 Codex 默认 Home 行为。
@@ -58,7 +58,7 @@
 
 ## 设置和代理
 
-设置页面包含 Codex 启动设置、代理设置、登录 Windows 后自动启动和 Light/Dark 主题选择。
+设置页面包含 Codex 启动设置、代理设置、登录 Windows 后自动启动、任务挂件开关和 Light/Dark 主题选择。
 
 - 代理支持 `http` 和 `socks5`。
 - 保存代理后，本工具会立即使用该代理。
@@ -125,4 +125,4 @@ npm run tauri:build
 
 发布前必须更新 `CHANGELOG.md`、`README.md` 和 `README.zh-CN.md`。
 
-当前版本：`0.2.14`。
+当前版本：`0.2.15`。

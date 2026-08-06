@@ -1,0 +1,315 @@
+{
+  "schemaVersion": 1,
+  "id": "task-monitor-widget",
+  "objective": "实现 Windows 桌面任务监控挂件，展示 Codex 会话的运行中、等待用户、完成和失败状态，并在需要用户处理或任务结束时发送系统通知。",
+  "acceptanceCriteria": [
+    {
+      "id": "widget",
+      "description": "提供独立、无边框、可置顶和折叠的桌面挂件，展示运行中及最近完成任务",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "states",
+      "description": "从受管 Profile 的 Codex session 日志识别运行中、等待用户、完成和失败状态，避免仅用进程存活判断完成",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "notifications",
+      "description": "状态首次变为等待用户、完成或失败时发送一次 Windows 系统通知",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "interaction",
+      "description": "挂件可显示任务标题、Profile、持续时间，并能唤起对应 Codex 实例或主窗口",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "persistence",
+      "description": "任务状态及通知去重信息在应用重启后保持一致",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "verification",
+      "description": "前端构建、Rust 格式检查、Rust 检查和 Rust 测试通过",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "waiting-kinds",
+      "description": "识别等待选择、等待文字回复和等待授权三类用户阻塞状态，橙色高亮并通知，用户回复后自动恢复运行中",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "toggle",
+      "description": "设置页提供持久化挂件开关，关闭时不显示也不轮询，重新启用时恢复窗口",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "turn-tasks",
+      "description": "每个 task_started 轮次生成独立任务并使用该轮用户消息命名",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "bubble",
+      "description": "折叠态为紧凑悬浮气泡，点击展开完整挂件",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "recent-limit",
+      "description": "最近结束默认显示3条，并可通过查看全部展开或收起",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "profile-focus",
+      "description": "点击任务唤醒其所属Profile的Codex窗口，不依赖未公开thread deep link",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "bubble-56",
+      "description": "折叠态原生窗口、WebView视口和可点击区域均严格为56x56逻辑像素，不允许额外透明留白或矩形容器",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "bubble-transparency",
+      "description": "折叠态56x56圆形气泡之外必须真实透出桌面，在浅色与深色背景实机截图中均不得出现黑色或主题色矩形边框",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "bubble-visual",
+      "description": "折叠态使用精简机器人头像气泡，运行蓝、等待橙、空闲绿三态清晰且在56x56内保持高质感、无文字拥挤",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "bubble-motion",
+      "description": "运行态采用克制流畅的单一主动画，等待态采用低频提醒动画，空闲态静止；支持prefers-reduced-motion且不得整窗缩放、闪烁或使用大范围虚线旋转",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "bubble-interaction",
+      "description": "56x56气泡支持按住拖动与点击展开，拖动不得误触展开，展开后仍显示完整任务列表",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "visual-evidence",
+      "description": "必须重启真实Tauri应用，在浅色桌面背景分别截图折叠态和展开态，并记录56x56窗口尺寸及拖动实测证据后才可交付",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    }
+  ],
+  "constraints": [
+    "仅监控本工具托管 Profile 的本地 session 日志，不读取或显示完整对话正文",
+    "保持现有 Profile、认证、代理、资源同步和默认 Codex 启动行为不变",
+    "沿用现有 React、Tauri、Rust 架构和 DESIGN.md 视觉规范",
+    "折叠态不得复用完整机器人布局后通过scale缩小，必须使用专用56x56结构"
+  ],
+  "nonGoals": [
+    "不实现项目看板、Git 分支或 worktree 管理、评论附件、多人或云同步"
+  ],
+  "requiredDeliverables": [
+    {
+      "id": "backend",
+      "path": "src-tauri/src/main.rs"
+    },
+    {
+      "id": "widget",
+      "path": "src/main.tsx"
+    },
+    {
+      "id": "styles",
+      "path": "src/style.css"
+    }
+  ],
+  "risk": {
+    "level": "MEDIUM",
+    "reasons": [
+      "依赖 session JSONL 事件结构，且新增后台监控、多窗口和系统通知",
+      "Windows WebView2透明窗口和高DPI逻辑像素可能导致黑框、尺寸偏差及命中区域错位"
+    ]
+  },
+  "escalateWhen": [
+    "无法从当前 session 事件可靠区分状态时，降级为未知且不发送完成通知",
+    "Tauri/WebView2公开透明配置无法在Windows浅色背景消除矩形底色时，停止视觉微调并提出原生窗口层替代方案"
+  ],
+  "requiredApprovals": [
+    "新增官方 Tauri 通知插件（用户已批准）"
+  ],
+  "createdAt": "2026-08-05T04:22:51.511241+00:00",
+  "revisions": [
+    {
+      "revisedAt": "2026-08-05T04:26:32.744499+00:00",
+      "addedCriteria": [
+        {
+          "id": "waiting-kinds",
+          "description": "识别等待选择、等待文字回复和等待授权三类用户阻塞状态，橙色高亮并通知，用户回复后自动恢复运行中",
+          "required": true,
+          "verification": {
+            "type": "manual"
+          }
+        }
+      ]
+    },
+    {
+      "revisedAt": "2026-08-05T06:03:16.427771+00:00",
+      "addedCriteria": [
+        {
+          "id": "toggle",
+          "description": "设置页提供持久化挂件开关，关闭时不显示也不轮询，重新启用时恢复窗口",
+          "required": true,
+          "verification": {
+            "type": "manual"
+          }
+        },
+        {
+          "id": "turn-tasks",
+          "description": "每个 task_started 轮次生成独立任务并使用该轮用户消息命名",
+          "required": true,
+          "verification": {
+            "type": "manual"
+          }
+        },
+        {
+          "id": "bubble",
+          "description": "折叠态为紧凑悬浮气泡，点击展开完整挂件",
+          "required": true,
+          "verification": {
+            "type": "manual"
+          }
+        },
+        {
+          "id": "recent-limit",
+          "description": "最近结束默认显示3条，并可通过查看全部展开或收起",
+          "required": true,
+          "verification": {
+            "type": "manual"
+          }
+        },
+        {
+          "id": "profile-focus",
+          "description": "点击任务唤醒其所属Profile的Codex窗口，不依赖未公开thread deep link",
+          "required": true,
+          "verification": {
+            "type": "manual"
+          }
+        }
+      ]
+    },
+    {
+      "revisedAt": "2026-08-05T07:24:01.848300+00:00",
+      "addedCriteria": [
+        {
+          "id": "bubble-56",
+          "description": "折叠态原生窗口、WebView视口和可点击区域均严格为56x56逻辑像素，不允许额外透明留白或矩形容器",
+          "required": true,
+          "verification": {
+            "type": "manual"
+          }
+        },
+        {
+          "id": "bubble-transparency",
+          "description": "折叠态56x56圆形气泡之外必须真实透出桌面，在浅色与深色背景实机截图中均不得出现黑色或主题色矩形边框",
+          "required": true,
+          "verification": {
+            "type": "manual"
+          }
+        },
+        {
+          "id": "bubble-visual",
+          "description": "折叠态使用精简机器人头像气泡，运行蓝、等待橙、空闲绿三态清晰且在56x56内保持高质感、无文字拥挤",
+          "required": true,
+          "verification": {
+            "type": "manual"
+          }
+        },
+        {
+          "id": "bubble-motion",
+          "description": "运行态采用克制流畅的单一主动画，等待态采用低频提醒动画，空闲态静止；支持prefers-reduced-motion且不得整窗缩放、闪烁或使用大范围虚线旋转",
+          "required": true,
+          "verification": {
+            "type": "manual"
+          }
+        },
+        {
+          "id": "bubble-interaction",
+          "description": "56x56气泡支持按住拖动与点击展开，拖动不得误触展开，展开后仍显示完整任务列表",
+          "required": true,
+          "verification": {
+            "type": "manual"
+          }
+        },
+        {
+          "id": "visual-evidence",
+          "description": "必须重启真实Tauri应用，在浅色桌面背景分别截图折叠态和展开态，并记录56x56窗口尺寸及拖动实测证据后才可交付",
+          "required": true,
+          "verification": {
+            "type": "manual"
+          }
+        }
+      ],
+      "addedConstraints": [
+        "折叠态不得复用完整机器人布局后通过scale缩小，必须使用专用56x56结构"
+      ],
+      "risk": {
+        "level": "MEDIUM",
+        "reasons": [
+          "依赖 session JSONL 事件结构，且新增后台监控、多窗口和系统通知",
+          "Windows WebView2透明窗口和高DPI逻辑像素可能导致黑框、尺寸偏差及命中区域错位"
+        ]
+      },
+      "addedEscalationConditions": [
+        "Tauri/WebView2公开透明配置无法在Windows浅色背景消除矩形底色时，停止视觉微调并提出原生窗口层替代方案"
+      ]
+    }
+  ]
+}

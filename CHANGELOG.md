@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.15 - 2026-08-06
+
+- Refined the expanded task widget into a tighter transparent desktop control with a complete robot, compact empty state, fixed task-count action, and WebView2-safe dark scrolling.
+- Removed clipped outer shadows and mismatched widget sizing that produced rectangular grey edges around the rounded panel on Windows.
+- Kept the task widget hidden during background startup until explicitly shown, while preserving its tray and settings controls.
+- Added clearer task-loading failure feedback, visible keyboard focus treatments, and long-title tooltips.
+
 ## 0.2.14 - 2026-08-05
 
 - Added a draggable task widget that tracks running, waiting-for-input, and recently completed Codex tasks across managed Profiles.
