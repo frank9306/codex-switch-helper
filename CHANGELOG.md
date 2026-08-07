@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.16 - 2026-08-07
+
+- Unified third-party Skills and Plugins under `~/.agents`, with Profile/default-Home discovery, content-aware conflict handling, verified backups, and protected legacy cleanup.
+- Added live resource-directory watching and a resource-page migration preview that keeps Codex-managed system resources and generated plugin caches outside destructive operations.
+
 ## 0.2.15 - 2026-08-06
 
 - Refined the expanded task widget into a tighter transparent desktop control with a complete robot, compact empty state, fixed task-count action, and WebView2-safe dark scrolling.

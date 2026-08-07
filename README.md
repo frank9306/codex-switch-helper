@@ -14,8 +14,9 @@ Tauri desktop helper for switching Codex App profiles on Windows.
 - Gives every Profile an isolated tool-managed Home.
 - Supports account-login Profiles and API-key Profiles.
 - Edits and refreshes one global `~/.agents/AGENTS.md`, linked into every managed Profile Home.
-- Automatically imports missing Skills from `~/.codex/skills` into the shared directory without overwriting existing entries.
-- Automatically collects third-party Plugins from managed Profiles into `~/.agents/plugins` and synchronizes them to every managed Profile through a local `agents-shared` Marketplace.
+- Treats `~/.agents/skills` and `~/.agents/plugins` as the canonical managed resource library, scanning the default Codex Home and every managed Profile for legacy copies.
+- Previews, backs up, verifies, and then removes migrated third-party copies; same-name content conflicts require an explicit keep-source choice.
+- Shows Codex-managed system Skills and official Plugins without moving them. Generated `agents-shared` Profile caches remain runtime copies and are not listed as separate managed plugins.
 - Supports HTTP and SOCKS5 proxy settings for the helper app and Codex launches.
 - Runs multiple isolated Codex instances in parallel.
 - Keeps the helper responsive during active Codex tasks by performing Profile inspection, launch preparation, and process checks outside the UI event thread.
@@ -125,4 +126,4 @@ npm run tauri:build
 
 Also update `CHANGELOG.md`, `README.md`, and `README.zh-CN.md` before tagging a release.
 
-Current release: `0.2.15`.
+Current release: `0.2.16`.

@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "id": "unified-resource-management",
+  "objective": "将第三方 Skills 与插件统一管理到 ~/.agents，安全迁移并清理旧副本，同时保留 Codex 管理的系统资源与插件运行缓存。",
+  "acceptanceCriteria": [
+    {
+      "id": "canonical",
+      "description": "第三方 Skills 和插件以 ~/.agents 为唯一可管理源，资源列表按规范路径和作用域识别。",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "safe-migration",
+      "description": "迁移先预检、备份、复制并校验，只有无冲突或用户已选择保留版本时才删除受控旧副本。",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "system-boundary",
+      "description": "系统 Skills 与官方插件仅展示不迁移，agents-shared Profile cache 保留为不可编辑运行缓存。",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "realtime",
+      "description": "应用启动、资源刷新及 Profile 生命周期触发扫描，运行期间目录变化经防抖监听同步。",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "ui",
+      "description": "资源页展示同步状态、来源、重复与冲突，并支持用户选择同名异内容的保留版本。",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    },
+    {
+      "id": "verification",
+      "description": "前端构建、Rust 格式检查、Rust 检查及相关 Rust 测试通过。",
+      "required": true,
+      "verification": {
+        "type": "manual"
+      }
+    }
+  ],
+  "constraints": [
+    "不得迁移或删除 OpenAI 系统 Skill、官方插件或未知路径。",
+    "不得自动覆盖同名异内容资源。",
+    "保留现有 Profile API、认证数据和非资源配置。"
+  ],
+  "nonGoals": [
+    "不改变 Codex 官方插件安装机制或消除必要的 Profile 运行缓存。"
+  ],
+  "requiredDeliverables": [
+    {
+      "id": "backend",
+      "path": "src-tauri/src/main.rs"
+    },
+    {
+      "id": "frontend",
+      "path": "src/main.tsx"
+    },
+    {
+      "id": "styles",
+      "path": "src/style.css"
+    },
+    {
+      "id": "docs",
+      "path": "README.md"
+    }
+  ],
+  "risk": {
+    "level": "HIGH",
+    "reasons": [
+      "涉及用户本地资源迁移、备份和受控删除，以及文件系统监听。"
+    ]
+  },
+  "escalateWhen": [
+    "候选路径无法证明位于允许根目录、复制校验失败或检测到未解决冲突。"
+  ],
+  "requiredApprovals": [
+    "新增 notify 依赖以及首次迁移删除预览；用户已在本任务中明确批准计划。"
+  ],
+  "createdAt": "2026-08-07T03:08:37.279207+00:00",
+  "revisions": []
+}

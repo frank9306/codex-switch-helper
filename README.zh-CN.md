@@ -14,8 +14,9 @@
 - 每个 Profile 使用独立的工具托管目录。
 - 支持账号登录 Profile 和 API Key 登录 Profile。
 - 查看、编辑并刷新全局 `~/.agents/AGENTS.md`；该文件会链接到所有托管 Profile Home。
-- 自动将 `~/.codex/skills` 中缺失的 Skills 非覆盖式导入共享目录。
-- 自动将托管 Profile 中的第三方 Plugins 汇总到 `~/.agents/plugins`，并通过本地 `agents-shared` Marketplace 同步到所有托管 Profile。
+- 将 `~/.agents/skills` 和 `~/.agents/plugins` 作为唯一可管理资源库，实时扫描默认 Codex Home 与所有托管 Profile 中的旧副本。
+- 迁移前提供预览，完成备份和内容校验后才清理第三方旧副本；同名异内容资源必须由用户选择保留来源。
+- 系统 Skills 与官方 Plugins 只统一展示、不迁移；`agents-shared` Profile cache 作为运行副本保留，不重复列为可管理插件。
 - 支持为本工具和 Codex 启动配置 HTTP / SOCKS5 代理。
 - 支持同时启动和停止多个独立 Codex 实例。
 - Profile 检查、启动准备和进程状态查询不会占用 UI 事件线程，Codex 运行任务时切换工具仍可保持响应。
@@ -125,4 +126,4 @@ npm run tauri:build
 
 发布前必须更新 `CHANGELOG.md`、`README.md` 和 `README.zh-CN.md`。
 
-当前版本：`0.2.15`。
+当前版本：`0.2.16`。

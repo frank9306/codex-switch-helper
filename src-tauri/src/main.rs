@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use chrono::{DateTime, Utc};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 #[cfg(windows)]
@@ -12,15 +13,18 @@ use std::{
     env,
     ffi::{OsStr, OsString},
     fs,
+    hash::Hasher,
     io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::Command,
-    sync::{Mutex, OnceLock},
+    sync::{mpsc, Mutex, OnceLock},
+    thread,
+    time::{Duration, Instant},
 };
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+    AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 use uuid::Uuid;
 use winreg::{enums::HKEY_CURRENT_USER, RegKey};
@@ -255,6 +259,7 @@ struct SessionUsage {
 struct SharedPlugins {
     marketplace_path: String,
     plugins: Vec<SharedPluginInfo>,
+    locations: Vec<ResourceLocationInfo>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -296,6 +301,8 @@ struct ResourceSource {
     source: String,
     #[serde(default)]
     subpath: Option<String>,
+    #[serde(default)]
+    canonical_path: Option<String>,
     updated_at: String,
 }
 
@@ -336,6 +343,61 @@ struct ResourceUpdateCheck {
 struct AutomaticResourceSyncResult {
     skills: SkillImportResult,
     plugins: PluginSyncResult,
+    preview: ResourceSyncPreview,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceLocationInfo {
+    id: String,
+    kind: ResourceKindValue,
+    name: String,
+    version: Option<String>,
+    path: String,
+    scope: String,
+    content_hash: String,
+    canonical: bool,
+    codex_managed: bool,
+    runtime_cache: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceConflict {
+    id: String,
+    kind: ResourceKindValue,
+    name: String,
+    candidates: Vec<ResourceLocationInfo>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceSyncPreview {
+    canonical_root: String,
+    locations: Vec<ResourceLocationInfo>,
+    migrate: Vec<ResourceLocationInfo>,
+    duplicates: Vec<ResourceLocationInfo>,
+    conflicts: Vec<ResourceConflict>,
+    skipped: Vec<String>,
+    requires_confirmation: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceConflictResolution {
+    conflict_id: String,
+    keep_id: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceSyncApplyResult {
+    migrated: Vec<String>,
+    removed: Vec<String>,
+    backed_up: Vec<String>,
+    skipped: Vec<String>,
+    conflicts: Vec<ResourceConflict>,
+    backup_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -496,6 +558,7 @@ fn create_profile(
         data.active_profile_id = Some(profile.id.clone());
     }
     save_data(&app, &data)?;
+    let _ = app.emit("resource-roots-changed", ());
     Ok(profile)
 }
 
@@ -761,6 +824,7 @@ fn launch_codex_blocking(app: AppHandle, profile_id: String) -> Result<CodexInst
     data.profiles[profile_index].updated_at = now.clone();
     data.active_profile_id = Some(profile_id.clone());
     save_data(&app, &data)?;
+    let _ = app.emit("resource-roots-changed", ());
     let instance = CodexInstance {
         profile_id,
         profile_name: data.profiles[profile_index].name.clone(),
@@ -1821,20 +1885,12 @@ fn resource_usage(app: &AppHandle) -> Result<ResourceUsage, String> {
         .lock()
         .map_err(|_| "使用统计锁不可用。".to_string())?;
     let data = load_data(app)?;
-    let mut skill_names = BTreeSet::new();
-    for root in [
-        agents_root()?.join("skills"),
-        default_codex_home()?.join("skills"),
-    ] {
-        if root.is_dir() {
-            for entry in fs::read_dir(root).map_err(format_io_error)? {
-                let entry = entry.map_err(format_io_error)?;
-                if entry.path().join("SKILL.md").is_file() {
-                    skill_names.insert(entry.file_name().to_string_lossy().to_string());
-                }
-            }
-        }
-    }
+    let skill_names = build_resource_sync_preview(app)?
+        .locations
+        .into_iter()
+        .filter(|item| item.kind == ResourceKindValue::Skill)
+        .map(|item| item.name)
+        .collect::<BTreeSet<_>>();
     let plugin_aliases = collect_shared_plugins()?
         .into_iter()
         .map(|(manifest, path)| {
@@ -1897,6 +1953,7 @@ async fn get_shared_resources(app: AppHandle) -> Result<SharedResources, String>
 fn get_shared_resources_blocking(app: AppHandle) -> Result<SharedResources, String> {
     let usage = resource_usage(&app)?;
     let registry = load_resource_registry(&app)?;
+    let preview = build_resource_sync_preview(&app)?;
     let root = agents_root()?;
     let agents_path = root.join(SHARED_AGENTS_FILENAME);
     let shared_skills_path = root.join("skills");
@@ -1906,24 +1963,44 @@ fn get_shared_resources_blocking(app: AppHandle) -> Result<SharedResources, Stri
     } else {
         String::new()
     };
-    let mut skills = Vec::new();
-    collect_skills(
-        &shared_skills_path,
-        "~/.agents",
-        true,
-        &registry,
-        &mut skills,
-    )?;
-    let mut legacy_skills = Vec::new();
-    collect_skills(
-        &codex_skills_path,
-        "~/.codex",
-        false,
-        &registry,
-        &mut legacy_skills,
-    )?;
-    legacy_skills.retain(|legacy| !skills.iter().any(|skill| skill.name == legacy.name));
-    skills.extend(legacy_skills);
+    let mut seen_system_skills = BTreeSet::new();
+    let mut skills = preview
+        .locations
+        .iter()
+        .filter(|item| item.kind == ResourceKindValue::Skill)
+        .filter(|item| {
+            !item.codex_managed
+                || seen_system_skills.insert(format!("{}:{}", item.name, item.content_hash))
+        })
+        .map(|item| {
+            let content =
+                fs::read_to_string(Path::new(&item.path).join("SKILL.md")).unwrap_or_default();
+            let registration = registry.resources.iter().find(|registration| {
+                registration.kind == ResourceKindValue::Skill && registration.name == item.name
+            });
+            SkillInfo {
+                name: item.name.clone(),
+                version: item.version.clone(),
+                path: item.path.clone(),
+                source: if item.codex_managed {
+                    "Codex 管理".to_string()
+                } else if item.canonical {
+                    "全局共享".to_string()
+                } else {
+                    "待同步".to_string()
+                },
+                shared: item.canonical,
+                description: frontmatter_value(&content, "description"),
+                managed: item.codex_managed || registration.is_some(),
+                source_type: registration.map(|value| source_type_label(value.source_type)),
+                source_label: Some(item.scope.clone()),
+                can_update: item.canonical && registration.is_some(),
+                updated_at: file_modified_at(&Path::new(&item.path).join("SKILL.md")),
+                usage_count: 0,
+                last_used_at: None,
+            }
+        })
+        .collect::<Vec<_>>();
     for skill in &mut skills {
         if let Some(summary) = usage.skills.get(&skill.name) {
             skill.usage_count = summary.count;
@@ -1938,53 +2015,10 @@ fn get_shared_resources_blocking(app: AppHandle) -> Result<SharedResources, Stri
         skills_paths: vec![
             shared_skills_path.to_string_lossy().to_string(),
             codex_skills_path.to_string_lossy().to_string(),
+            "所有托管 Profile 的 home/skills（只读扫描）".to_string(),
         ],
         skills,
     })
-}
-
-fn collect_skills(
-    skills_path: &Path,
-    source: &str,
-    shared: bool,
-    registry: &ResourceSourceRegistry,
-    skills: &mut Vec<SkillInfo>,
-) -> Result<(), String> {
-    if skills_path.is_dir() {
-        for entry in fs::read_dir(skills_path).map_err(format_io_error)? {
-            let entry = entry.map_err(format_io_error)?;
-            let path = entry.path();
-            let skill_file = path.join("SKILL.md");
-            if !path.is_dir() || !skill_file.is_file() {
-                continue;
-            }
-            let content = fs::read_to_string(&skill_file).unwrap_or_default();
-            let description = frontmatter_value(&content, "description");
-            let version = frontmatter_value(&content, "version");
-            let name = entry.file_name().to_string_lossy().to_string();
-            let registration = registry
-                .resources
-                .iter()
-                .find(|item| item.kind == ResourceKindValue::Skill && item.name == name);
-            skills.push(SkillInfo {
-                name,
-                version,
-                path: path.to_string_lossy().to_string(),
-                source: source.to_string(),
-                shared,
-                description,
-                managed: registration.is_some(),
-                source_type: registration.map(|item| source_type_label(item.source_type)),
-                source_label: registration.map(resource_source_label),
-                can_update: registration.is_some(),
-                updated_at: file_modified_at(&skill_file)
-                    .or_else(|| registration.map(|item| item.updated_at.clone())),
-                usage_count: 0,
-                last_used_at: None,
-            });
-        }
-    }
-    Ok(())
 }
 
 fn frontmatter_value(content: &str, key: &str) -> Option<String> {
@@ -2330,6 +2364,7 @@ fn install_resource_from_registration(
             source_type,
             source,
             subpath: normalized_subpath,
+            canonical_path: Some(target.to_string_lossy().to_string()),
             updated_at: now,
         });
         save_resource_registry(app, &registry)?;
@@ -2948,12 +2983,18 @@ fn get_shared_plugins_blocking(app: AppHandle) -> Result<SharedPlugins, String> 
             }
         })
         .collect();
+    let locations = build_resource_sync_preview(&app)?
+        .locations
+        .into_iter()
+        .filter(|item| item.kind == ResourceKindValue::Plugin)
+        .collect();
     Ok(SharedPlugins {
         marketplace_path: shared_plugins_root()?
             .join("marketplace.json")
             .to_string_lossy()
             .to_string(),
         plugins,
+        locations,
     })
 }
 
@@ -3075,11 +3116,588 @@ fn sync_shared_plugins(app: AppHandle) -> Result<PluginSyncResult, String> {
     Ok(result)
 }
 
+fn stable_directory_hash(root: &Path) -> Result<String, String> {
+    fn visit(root: &Path, path: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+        for entry in fs::read_dir(path).map_err(format_io_error)? {
+            let entry = entry.map_err(format_io_error)?;
+            let metadata = fs::symlink_metadata(entry.path()).map_err(format_io_error)?;
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "拒绝包含符号链接的资源：{}",
+                    entry.path().display()
+                ));
+            }
+            if metadata.is_dir() {
+                visit(root, &entry.path(), files)?;
+            } else if metadata.is_file() {
+                files.push(
+                    entry
+                        .path()
+                        .strip_prefix(root)
+                        .unwrap_or(&entry.path())
+                        .to_path_buf(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    visit(root, root, &mut files)?;
+    files.sort();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for relative in files {
+        hasher.write(relative.to_string_lossy().replace('\\', "/").as_bytes());
+        let bytes = fs::read(root.join(&relative)).map_err(format_io_error)?;
+        hasher.write_usize(bytes.len());
+        hasher.write(&bytes);
+    }
+    Ok(format!("{:016x}", hasher.finish()))
+}
+
+fn resource_location(
+    kind: ResourceKindValue,
+    name: String,
+    version: Option<String>,
+    path: PathBuf,
+    scope: String,
+    canonical: bool,
+    codex_managed: bool,
+    runtime_cache: bool,
+) -> Result<ResourceLocationInfo, String> {
+    if fs::symlink_metadata(&path)
+        .map_err(format_io_error)?
+        .file_type()
+        .is_symlink()
+    {
+        return Err(format!("拒绝符号链接资源根目录：{}", path.display()));
+    }
+    let content_hash = stable_directory_hash(&path)?;
+    let id = format!(
+        "{}:{}",
+        match kind {
+            ResourceKindValue::Skill => "skill",
+            ResourceKindValue::Plugin => "plugin",
+        },
+        path.to_string_lossy().to_ascii_lowercase()
+    );
+    Ok(ResourceLocationInfo {
+        id,
+        kind,
+        name,
+        version,
+        path: path.to_string_lossy().to_string(),
+        scope,
+        content_hash,
+        canonical,
+        codex_managed,
+        runtime_cache,
+    })
+}
+
+fn collect_skill_locations(
+    root: &Path,
+    scope: &str,
+    canonical: bool,
+    locations: &mut Vec<ResourceLocationInfo>,
+    skipped: &mut Vec<String>,
+) -> Result<(), String> {
+    if !root.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root).map_err(format_io_error)? {
+        let entry = entry.map_err(format_io_error)?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if entry.file_name() == ".system" {
+            for system_entry in fs::read_dir(&path).map_err(format_io_error)? {
+                let system_entry = system_entry.map_err(format_io_error)?;
+                let system_path = system_entry.path();
+                if system_path.join("SKILL.md").is_file() {
+                    match resource_location(
+                        ResourceKindValue::Skill,
+                        system_entry.file_name().to_string_lossy().to_string(),
+                        None,
+                        system_path,
+                        format!("{scope} · Codex 系统"),
+                        false,
+                        true,
+                        false,
+                    ) {
+                        Ok(item) => locations.push(item),
+                        Err(error) => skipped.push(error),
+                    }
+                }
+            }
+            continue;
+        }
+        let skill_file = path.join("SKILL.md");
+        if !skill_file.is_file() {
+            continue;
+        }
+        let content = fs::read_to_string(&skill_file).unwrap_or_default();
+        match resource_location(
+            ResourceKindValue::Skill,
+            entry.file_name().to_string_lossy().to_string(),
+            frontmatter_value(&content, "version"),
+            path,
+            scope.to_string(),
+            canonical,
+            false,
+            false,
+        ) {
+            Ok(item) => locations.push(item),
+            Err(error) => skipped.push(error),
+        }
+    }
+    Ok(())
+}
+
+fn collect_plugin_locations(
+    cache_root: &Path,
+    scope: &str,
+    locations: &mut Vec<ResourceLocationInfo>,
+    skipped: &mut Vec<String>,
+) -> Result<(), String> {
+    if !cache_root.is_dir() {
+        return Ok(());
+    }
+    for marketplace_entry in fs::read_dir(cache_root).map_err(format_io_error)? {
+        let marketplace_entry = marketplace_entry.map_err(format_io_error)?;
+        if !marketplace_entry.path().is_dir() {
+            continue;
+        }
+        let marketplace = marketplace_entry.file_name().to_string_lossy().to_string();
+        let official = OFFICIAL_PLUGIN_MARKETPLACES.contains(&marketplace.as_str());
+        let runtime = marketplace == SHARED_PLUGIN_MARKETPLACE;
+        for plugin_entry in fs::read_dir(marketplace_entry.path()).map_err(format_io_error)? {
+            let plugin_entry = plugin_entry.map_err(format_io_error)?;
+            if !plugin_entry.path().is_dir() {
+                continue;
+            }
+            for version_entry in fs::read_dir(plugin_entry.path()).map_err(format_io_error)? {
+                let version_entry = version_entry.map_err(format_io_error)?;
+                if !version_entry.path().is_dir() {
+                    continue;
+                }
+                let manifest = match plugin_manifest(&version_entry.path()) {
+                    Ok(manifest) => manifest,
+                    Err(error) => {
+                        skipped.push(error);
+                        continue;
+                    }
+                };
+                match resource_location(
+                    ResourceKindValue::Plugin,
+                    manifest.name,
+                    Some(manifest.version),
+                    version_entry.path(),
+                    format!("{scope} · {marketplace}"),
+                    false,
+                    official,
+                    runtime,
+                ) {
+                    Ok(item) => locations.push(item),
+                    Err(error) => skipped.push(error),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resource_group_key(item: &ResourceLocationInfo) -> String {
+    match item.kind {
+        ResourceKindValue::Skill => format!("skill:{}", item.name.to_ascii_lowercase()),
+        ResourceKindValue::Plugin => format!(
+            "plugin:{}@{}",
+            item.name.to_ascii_lowercase(),
+            item.version.as_deref().unwrap_or_default()
+        ),
+    }
+}
+
+fn build_resource_sync_preview(app: &AppHandle) -> Result<ResourceSyncPreview, String> {
+    let data = load_data(app)?;
+    let canonical_root = agents_root()?;
+    let mut locations = Vec::new();
+    let mut skipped = Vec::new();
+    collect_skill_locations(
+        &canonical_root.join("skills"),
+        "全局共享",
+        true,
+        &mut locations,
+        &mut skipped,
+    )?;
+    collect_skill_locations(
+        &default_codex_home()?.join("skills"),
+        "默认 Home",
+        false,
+        &mut locations,
+        &mut skipped,
+    )?;
+    for (manifest, path) in collect_shared_plugins()? {
+        match resource_location(
+            ResourceKindValue::Plugin,
+            manifest.name,
+            Some(manifest.version),
+            path,
+            "全局共享".to_string(),
+            true,
+            false,
+            false,
+        ) {
+            Ok(item) => locations.push(item),
+            Err(error) => skipped.push(error),
+        }
+    }
+    collect_plugin_locations(
+        &default_codex_home()?.join("plugins").join("cache"),
+        "默认 Home",
+        &mut locations,
+        &mut skipped,
+    )?;
+    for profile in data.profiles.iter().filter(|profile| profile.managed) {
+        let home = validated_managed_profile_home(app, profile)?;
+        collect_skill_locations(
+            &home.join("skills"),
+            &format!("Profile：{}", profile.name),
+            false,
+            &mut locations,
+            &mut skipped,
+        )?;
+        collect_plugin_locations(
+            &home.join("plugins").join("cache"),
+            &format!("Profile：{}", profile.name),
+            &mut locations,
+            &mut skipped,
+        )?;
+    }
+
+    let mut groups = BTreeMap::<String, Vec<ResourceLocationInfo>>::new();
+    for item in locations
+        .iter()
+        .filter(|item| !item.codex_managed && !item.runtime_cache)
+    {
+        groups
+            .entry(resource_group_key(item))
+            .or_default()
+            .push(item.clone());
+    }
+    let mut migrate = Vec::new();
+    let mut duplicates = Vec::new();
+    let mut conflicts = Vec::new();
+    for (key, candidates) in groups {
+        let hashes = candidates
+            .iter()
+            .map(|item| item.content_hash.clone())
+            .collect::<BTreeSet<_>>();
+        if hashes.len() > 1 {
+            conflicts.push(ResourceConflict {
+                id: key,
+                kind: candidates[0].kind,
+                name: candidates[0].name.clone(),
+                candidates,
+            });
+            continue;
+        }
+        let canonical = candidates.iter().any(|item| item.canonical);
+        let mut legacy = candidates
+            .into_iter()
+            .filter(|item| !item.canonical)
+            .collect::<Vec<_>>();
+        if canonical {
+            duplicates.append(&mut legacy);
+        } else if let Some(first) = legacy.first().cloned() {
+            migrate.push(first);
+            duplicates.extend(legacy.into_iter().skip(1));
+        }
+    }
+    let requires_confirmation =
+        !migrate.is_empty() || !duplicates.is_empty() || !conflicts.is_empty();
+    Ok(ResourceSyncPreview {
+        canonical_root: canonical_root.to_string_lossy().to_string(),
+        locations,
+        migrate,
+        duplicates,
+        conflicts,
+        skipped,
+        requires_confirmation,
+    })
+}
+
+#[tauri::command]
+fn preview_resource_sync(app: AppHandle) -> Result<ResourceSyncPreview, String> {
+    build_resource_sync_preview(&app)
+}
+
+fn canonical_resource_target(item: &ResourceLocationInfo) -> Result<PathBuf, String> {
+    match item.kind {
+        ResourceKindValue::Skill => Ok(agents_root()?.join("skills").join(&item.name)),
+        ResourceKindValue::Plugin => Ok(shared_plugins_root()?.join(&item.name).join(
+            item.version
+                .as_deref()
+                .ok_or_else(|| "插件缺少版本。".to_string())?,
+        )),
+    }
+}
+
+fn allowed_legacy_roots(app: &AppHandle) -> Result<Vec<PathBuf>, String> {
+    let mut roots = vec![
+        default_codex_home()?.join("skills"),
+        default_codex_home()?.join("plugins").join("cache"),
+    ];
+    for profile in load_data(app)?
+        .profiles
+        .iter()
+        .filter(|profile| profile.managed)
+    {
+        let home = validated_managed_profile_home(app, profile)?;
+        roots.push(home.join("skills"));
+        roots.push(home.join("plugins").join("cache"));
+    }
+    Ok(roots)
+}
+
+fn ensure_allowed_legacy_path(app: &AppHandle, path: &Path) -> Result<(), String> {
+    let actual = path.canonicalize().map_err(format_io_error)?;
+    if fs::symlink_metadata(path)
+        .map_err(format_io_error)?
+        .file_type()
+        .is_symlink()
+    {
+        return Err(format!("拒绝删除符号链接资源：{}", path.display()));
+    }
+    let allowed = allowed_legacy_roots(app)?
+        .into_iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .any(|root| actual.starts_with(root));
+    if !allowed {
+        return Err(format!("资源不在允许清理的目录中：{}", path.display()));
+    }
+    Ok(())
+}
+
+fn backup_resource(source: &Path, backup_root: &Path, id: &str) -> Result<PathBuf, String> {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    hasher.write(id.as_bytes());
+    let target = backup_root.join(format!("resource-{:016x}", hasher.finish()));
+    copy_dir_recursive(source, &target).map_err(format_io_error)?;
+    if stable_directory_hash(source)? != stable_directory_hash(&target)? {
+        return Err(format!("备份校验失败：{}", source.display()));
+    }
+    Ok(target)
+}
+
+fn install_canonical_copy(source: &Path, target: &Path) -> Result<(), String> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(format_io_error)?;
+    }
+    let temporary = target.with_file_name(format!(
+        ".{}.sync-{}",
+        target.file_name().unwrap_or_default().to_string_lossy(),
+        Uuid::new_v4()
+    ));
+    copy_dir_recursive(source, &temporary).map_err(format_io_error)?;
+    if stable_directory_hash(source)? != stable_directory_hash(&temporary)? {
+        let _ = fs::remove_dir_all(&temporary);
+        return Err(format!("复制校验失败：{}", source.display()));
+    }
+    if target.exists() {
+        fs::remove_dir_all(target).map_err(format_io_error)?;
+    }
+    fs::rename(temporary, target).map_err(format_io_error)
+}
+
+#[tauri::command]
+fn apply_resource_sync(
+    app: AppHandle,
+    resolutions: Vec<ResourceConflictResolution>,
+    confirmed: bool,
+) -> Result<ResourceSyncApplyResult, String> {
+    let preview = build_resource_sync_preview(&app)?;
+    if preview.requires_confirmation && !confirmed {
+        return Err("迁移包含复制或删除操作，必须先确认预览。".to_string());
+    }
+    let choices = resolutions
+        .into_iter()
+        .map(|item| (item.conflict_id, item.keep_id))
+        .collect::<BTreeMap<_, _>>();
+    let mut result = ResourceSyncApplyResult::default();
+    let timestamp = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let backup_root = app_data_dir(&app)?
+        .join("backups")
+        .join(format!("resource-sync-{timestamp}"));
+    let mut groups = BTreeMap::<String, Vec<ResourceLocationInfo>>::new();
+    for item in preview
+        .locations
+        .iter()
+        .filter(|item| !item.codex_managed && !item.runtime_cache)
+    {
+        groups
+            .entry(resource_group_key(item))
+            .or_default()
+            .push(item.clone());
+    }
+
+    let mut manifest = Vec::<serde_json::Value>::new();
+    let mut pending_removals = Vec::<(PathBuf, String)>::new();
+    for (group_id, candidates) in groups {
+        let hashes = candidates
+            .iter()
+            .map(|item| item.content_hash.clone())
+            .collect::<BTreeSet<_>>();
+        let selected = if hashes.len() > 1 {
+            let Some(keep_id) = choices.get(&group_id) else {
+                result.conflicts.push(ResourceConflict {
+                    id: group_id,
+                    kind: candidates[0].kind,
+                    name: candidates[0].name.clone(),
+                    candidates,
+                });
+                continue;
+            };
+            candidates
+                .iter()
+                .find(|item| &item.id == keep_id)
+                .cloned()
+                .ok_or_else(|| format!("冲突选择无效：{group_id}"))?
+        } else {
+            candidates
+                .iter()
+                .find(|item| item.canonical)
+                .or_else(|| candidates.first())
+                .cloned()
+                .ok_or_else(|| format!("资源组为空：{group_id}"))?
+        };
+        let target = canonical_resource_target(&selected)?;
+        let target_hash = target
+            .is_dir()
+            .then(|| stable_directory_hash(&target))
+            .transpose()?;
+        if target_hash.as_deref() != Some(&selected.content_hash) {
+            if target.is_dir() {
+                let backup =
+                    backup_resource(&target, &backup_root, &format!("canonical-{group_id}"))?;
+                result.backed_up.push(backup.to_string_lossy().to_string());
+            }
+            install_canonical_copy(Path::new(&selected.path), &target)?;
+            result.migrated.push(target.to_string_lossy().to_string());
+        }
+        for candidate in candidates.iter().filter(|item| !item.canonical) {
+            let source = Path::new(&candidate.path);
+            ensure_allowed_legacy_path(&app, source)?;
+            if stable_directory_hash(source)? != candidate.content_hash {
+                return Err(format!("资源在预检后发生变化：{}", source.display()));
+            }
+            let backup = backup_resource(source, &backup_root, &candidate.id)?;
+            result.backed_up.push(backup.to_string_lossy().to_string());
+            manifest.push(serde_json::json!({
+                "source": candidate.path,
+                "target": target.to_string_lossy(),
+                "contentHash": candidate.content_hash,
+                "backup": backup.to_string_lossy(),
+                "createdAt": Utc::now().to_rfc3339(),
+            }));
+            pending_removals.push((source.to_path_buf(), candidate.path.clone()));
+        }
+    }
+    if !manifest.is_empty() {
+        fs::create_dir_all(&backup_root).map_err(format_io_error)?;
+        fs::write(
+            backup_root.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?,
+        )
+        .map_err(format_io_error)?;
+        result.backup_path = Some(backup_root.to_string_lossy().to_string());
+    }
+    for (source, display_path) in pending_removals {
+        fs::remove_dir_all(source).map_err(format_io_error)?;
+        result.removed.push(display_path);
+    }
+    write_shared_marketplace(&collect_shared_plugins()?)?;
+    let sync = sync_shared_plugins(app.clone())?;
+    result.skipped.extend(sync.profile_errors);
+    Ok(result)
+}
+
+fn start_resource_watcher(app: AppHandle) -> Result<(), String> {
+    let (sender, receiver) = mpsc::channel();
+    let mut watcher = notify::recommended_watcher(move |event| {
+        let _ = sender.send(event);
+    })
+    .map_err(|error| error.to_string())?;
+    let roots = vec![
+        agents_root()?.join("skills"),
+        agents_root()?.join("plugins"),
+        default_codex_home()?.join("skills"),
+        default_codex_home()?.join("plugins").join("cache"),
+        app_data_dir(&app)?.join("profiles"),
+    ];
+    for root in roots {
+        if root.is_dir() {
+            watcher
+                .watch(&root, RecursiveMode::Recursive)
+                .map_err(|error| format!("无法监听 {}：{error}", root.display()))?;
+        }
+    }
+    thread::spawn(move || {
+        let _watcher: RecommendedWatcher = watcher;
+        let mut last_emit = Instant::now() - Duration::from_secs(2);
+        while let Ok(event) = receiver.recv() {
+            let relevant = event.is_ok_and(|event| {
+                event.paths.iter().any(|path| {
+                    let parts = path
+                        .components()
+                        .map(|part| part.as_os_str().to_string_lossy().to_ascii_lowercase())
+                        .collect::<Vec<_>>();
+                    parts.iter().any(|part| part == "skills")
+                        || parts.windows(2).any(|parts| parts == ["plugins", "cache"])
+                        || parts
+                            .windows(2)
+                            .any(|parts| parts == [".agents", "plugins"])
+                })
+            });
+            if relevant && last_emit.elapsed() >= Duration::from_millis(800) {
+                last_emit = Instant::now();
+                let _ = app.emit("resource-roots-changed", ());
+            }
+        }
+    });
+    Ok(())
+}
+
 #[tauri::command]
 fn auto_sync_resources(app: AppHandle) -> Result<AutomaticResourceSyncResult, String> {
-    let skills = import_codex_skills()?;
-    let plugins = import_profile_plugins(app)?;
-    Ok(AutomaticResourceSyncResult { skills, plugins })
+    let preview = build_resource_sync_preview(&app)?;
+    let skills = SkillImportResult {
+        imported: preview
+            .migrate
+            .iter()
+            .filter(|item| item.kind == ResourceKindValue::Skill)
+            .count(),
+        skipped: preview
+            .duplicates
+            .iter()
+            .filter(|item| item.kind == ResourceKindValue::Skill)
+            .count(),
+    };
+    let plugins = PluginSyncResult {
+        conflicts: preview
+            .conflicts
+            .iter()
+            .filter(|item| item.kind == ResourceKindValue::Plugin)
+            .map(|item| item.name.clone())
+            .collect(),
+        ..Default::default()
+    };
+    Ok(AutomaticResourceSyncResult {
+        skills,
+        plugins,
+        preview,
+    })
 }
 
 #[tauri::command]
@@ -4846,6 +5464,71 @@ enabled = true
     }
 }
 
+#[cfg(test)]
+mod unified_resource_tests {
+    use super::*;
+
+    #[test]
+    fn directory_hash_is_content_and_path_sensitive() {
+        let root = env::temp_dir().join(format!("resource-hash-test-{}", Uuid::new_v4()));
+        let first = root.join("first");
+        let second = root.join("second");
+        fs::create_dir_all(first.join("nested")).unwrap();
+        fs::create_dir_all(second.join("nested")).unwrap();
+        fs::write(first.join("SKILL.md"), "same").unwrap();
+        fs::write(second.join("SKILL.md"), "same").unwrap();
+        fs::write(first.join("nested/data.txt"), "value").unwrap();
+        fs::write(second.join("nested/data.txt"), "value").unwrap();
+        assert_eq!(
+            stable_directory_hash(&first).unwrap(),
+            stable_directory_hash(&second).unwrap()
+        );
+        fs::write(second.join("nested/data.txt"), "changed").unwrap();
+        assert_ne!(
+            stable_directory_hash(&first).unwrap(),
+            stable_directory_hash(&second).unwrap()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn canonical_copy_is_verified_and_replaces_existing_content() {
+        let root = env::temp_dir().join(format!("resource-copy-test-{}", Uuid::new_v4()));
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        fs::write(source.join("SKILL.md"), "new").unwrap();
+        fs::write(target.join("SKILL.md"), "old").unwrap();
+        install_canonical_copy(&source, &target).unwrap();
+        assert_eq!(
+            stable_directory_hash(&source).unwrap(),
+            stable_directory_hash(&target).unwrap()
+        );
+        assert_eq!(fs::read_to_string(target.join("SKILL.md")).unwrap(), "new");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn plugin_group_identity_includes_version() {
+        let base = ResourceLocationInfo {
+            id: "one".to_string(),
+            kind: ResourceKindValue::Plugin,
+            name: "example".to_string(),
+            version: Some("1.0.0".to_string()),
+            path: "example".to_string(),
+            scope: "test".to_string(),
+            content_hash: "hash".to_string(),
+            canonical: false,
+            codex_managed: false,
+            runtime_cache: false,
+        };
+        let mut next = base.clone();
+        next.version = Some("2.0.0".to_string());
+        assert_ne!(resource_group_key(&base), resource_group_key(&next));
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -4898,6 +5581,9 @@ fn main() {
             {
                 ensure_task_widget(app.handle(), false).map_err(io::Error::other)?;
             }
+            if let Err(error) = start_resource_watcher(app.handle().clone()) {
+                eprintln!("资源目录监听未启动：{error}");
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -4939,6 +5625,8 @@ fn main() {
             update_all_resources,
             delete_resource,
             auto_sync_resources,
+            preview_resource_sync,
+            apply_resource_sync,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

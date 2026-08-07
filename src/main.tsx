@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { getVersion } from '@tauri-apps/api/app'
 import { createRoot } from 'react-dom/client'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog'
 import { relaunch } from '@tauri-apps/plugin-process'
 import { check } from '@tauri-apps/plugin-updater'
@@ -168,6 +169,7 @@ type SharedPlugins = {
     usageCount: number
     lastUsedAt?: string | null
   }>
+  locations: ResourceLocationInfo[]
 }
 
 type ResourceKind = 'skill' | 'plugin'
@@ -197,6 +199,51 @@ type PluginSyncResult = {
 type AutomaticResourceSyncResult = {
   skills: SkillImportResult
   plugins: PluginSyncResult
+  preview: ResourceSyncPreview
+}
+
+type ResourceLocationInfo = {
+  id: string
+  kind: ResourceKind
+  name: string
+  version?: string | null
+  path: string
+  scope: string
+  contentHash: string
+  canonical: boolean
+  codexManaged: boolean
+  runtimeCache: boolean
+}
+
+type ResourceConflict = {
+  id: string
+  kind: ResourceKind
+  name: string
+  candidates: ResourceLocationInfo[]
+}
+
+type ResourceSyncPreview = {
+  canonicalRoot: string
+  locations: ResourceLocationInfo[]
+  migrate: ResourceLocationInfo[]
+  duplicates: ResourceLocationInfo[]
+  conflicts: ResourceConflict[]
+  skipped: string[]
+  requiresConfirmation: boolean
+}
+
+type ResourceConflictResolution = {
+  conflictId: string
+  keepId: string
+}
+
+type ResourceSyncApplyResult = {
+  migrated: string[]
+  removed: string[]
+  backedUp: string[]
+  skipped: string[]
+  conflicts: ResourceConflict[]
+  backupPath?: string | null
 }
 
 function formatResourceTime(value?: string | null) {
@@ -473,6 +520,7 @@ function App() {
   const [loadingLabel, setLoadingLabel] = useState('')
   const [resources, setResources] = useState<SharedResources | null>(null)
   const [sharedPlugins, setSharedPlugins] = useState<SharedPlugins | null>(null)
+  const [resourcePreview, setResourcePreview] = useState<ResourceSyncPreview | null>(null)
   const [agentsDraft, setAgentsDraft] = useState('')
   const [instances, setInstances] = useState<CodexInstance[]>([])
   const [profileInspection, setProfileInspection] = useState<ProfileInspection | null>(null)
@@ -607,6 +655,23 @@ function App() {
         refreshResources(false)
       })
       .catch((error) => showError('加载应用状态失败', error))
+  }, [])
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    let timer: number | undefined
+    listen('resource-roots-changed', () => {
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => {
+        invoke<ResourceSyncPreview>('preview_resource_sync')
+          .then(setResourcePreview)
+          .catch((error) => showError('检查资源目录变化失败', error))
+      }, 900)
+    }).then((dispose) => { unlisten = dispose })
+    return () => {
+      window.clearTimeout(timer)
+      unlisten?.()
+    }
   }, [])
 
   useEffect(() => {
@@ -908,6 +973,7 @@ function App() {
       ])
       setResources(next)
       setSharedPlugins(plugins)
+      setResourcePreview(syncResult.preview)
       setAgentsDraft(next.agentsContent)
       const syncIssues = [...syncResult.plugins.conflicts, ...syncResult.plugins.profileErrors]
       if (syncIssues.length) {
@@ -925,6 +991,46 @@ function App() {
       setBusy(false)
       setLoadingLabel('')
     }
+  }
+
+  function applyResourceMigration(resolutions: ResourceConflictResolution[]) {
+    if (!resourcePreview?.requiresConfirmation) return
+    const unresolved = resourcePreview.conflicts.filter((conflict) => (
+      !resolutions.some((resolution) => resolution.conflictId === conflict.id)
+    ))
+    if (unresolved.length) {
+      showNotice('仍有资源冲突未选择保留版本', 'error', unresolved.map((item) => item.name).join('\n'))
+      return
+    }
+    const deleteCount = resourcePreview.duplicates.length
+      + resourcePreview.migrate.length
+      + resourcePreview.conflicts.reduce((count, item) => count + Math.max(0, item.candidates.filter((candidate) => !candidate.canonical).length), 0)
+    requestConfirm({
+      title: '统一 Skills 与插件资源',
+      body: '应用会先备份、复制并校验，然后删除受控目录中的旧副本。',
+      confirmLabel: '确认迁移并清理',
+      intent: 'danger',
+      requireText: '统一资源',
+      requireTextLabel: '输入 统一资源',
+      details: [
+        `迁入 ~/.agents：${resourcePreview.migrate.length} 项`,
+        `预计清理旧副本：${deleteCount} 项`,
+        `冲突选择：${resolutions.length} 项`,
+        '系统 Skill、官方插件和运行缓存不会删除',
+      ],
+      onConfirm: async () => {
+        await runAction(async () => {
+          const result = await invoke<ResourceSyncApplyResult>('apply_resource_sync', { resolutions, confirmed: true })
+          await refreshResourceLists()
+          const nextPreview = await invoke<ResourceSyncPreview>('preview_resource_sync')
+          setResourcePreview(nextPreview)
+          if (result.conflicts.length) {
+            showNotice('部分冲突仍未处理', 'error', result.conflicts.map((item) => item.name).join('\n'))
+          }
+          return `已迁移 ${result.migrated.length} 项，清理 ${result.removed.length} 个旧副本。备份：${result.backupPath || '无需备份'}`
+        }, '正在备份并统一资源...')
+      },
+    })
   }
 
   function operationSummary(result: ResourceOperationResult) {
@@ -1298,6 +1404,7 @@ function App() {
             busy={busy}
             draft={agentsDraft}
             plugins={sharedPlugins}
+            preview={resourcePreview}
             resources={resources}
             onChange={setAgentsDraft}
             onRefresh={() => refreshResources(true)}
@@ -1306,6 +1413,7 @@ function App() {
             onAddGit={setGitInstallKind}
             onCheckUpdate={checkResourceUpdate}
             onDelete={deleteResource}
+            onApplyMigration={applyResourceMigration}
           />
         ) : activeMenu === 'settings' ? (
           <section className="settings-grid">
@@ -1468,6 +1576,7 @@ function ResourcesPanel(props: {
   busy: boolean
   draft: string
   plugins: SharedPlugins | null
+  preview: ResourceSyncPreview | null
   resources: SharedResources | null
   onChange: (value: string) => void
   onRefresh: () => void
@@ -1476,10 +1585,12 @@ function ResourcesPanel(props: {
   onAddGit: (kind: ResourceKind) => void
   onCheckUpdate: (kind: ResourceKind, name: string) => void
   onDelete: (kind: ResourceKind, name: string) => void
+  onApplyMigration: (resolutions: ResourceConflictResolution[]) => void
 }) {
   const [activeResourceView, setActiveResourceView] = useState<'prompt' | 'skills' | 'plugins'>('prompt')
   const [skillQuery, setSkillQuery] = useState('')
   const [resourceSort, setResourceSort] = useState<'name' | 'usage' | 'recent'>('usage')
+  const [conflictChoices, setConflictChoices] = useState<Record<string, string>>({})
   if (!props.resources) {
     return <section className="panel resource-loading"><LoadingIndicator label="正在读取共享资源..." /></section>
   }
@@ -1498,8 +1609,18 @@ function ResourcesPanel(props: {
   const sortedPlugins = sortResources(props.plugins?.plugins || [])
   const skillGroups = [
     { key: 'shared', title: '全局共享', description: '~/.agents/skills，可供所有 Profile 使用', skills: filteredSkills.filter((skill) => skill.shared) },
-    { key: 'legacy', title: '默认 Home', description: '~/.codex/skills，可导入全局共享目录', skills: filteredSkills.filter((skill) => !skill.shared) },
+    { key: 'system', title: 'Codex 管理', description: '系统 Skill 只展示，不迁移或删除', skills: filteredSkills.filter((skill) => !skill.shared && skill.source === 'Codex 管理') },
+    { key: 'pending', title: '待统一来源', description: '来自默认 Home 或托管 Profile，确认后迁入 ~/.agents', skills: filteredSkills.filter((skill) => !skill.shared && skill.source !== 'Codex 管理') },
   ].filter((group) => group.skills.length > 0)
+  const conflictResolutions = Object.entries(conflictChoices).map(([conflictId, keepId]) => ({ conflictId, keepId }))
+  const observedPluginMap = new Map<string, ResourceLocationInfo & { locationCount: number }>()
+  for (const item of (props.plugins?.locations || []).filter((location) => location.codexManaged || location.runtimeCache)) {
+    const key = `${item.name}@${item.version || ''}:${item.runtimeCache ? 'runtime' : 'official'}`
+    const current = observedPluginMap.get(key)
+    if (current) current.locationCount += 1
+    else observedPluginMap.set(key, { ...item, locationCount: 1 })
+  }
+  const observedPlugins = [...observedPluginMap.values()]
 
   return (
     <section className="panel resource-workspace">
@@ -1519,6 +1640,37 @@ function ResourcesPanel(props: {
           刷新磁盘内容
         </button>
       </div>
+
+      {props.preview?.requiresConfirmation && (
+        <section className="resource-sync-banner" aria-live="polite">
+          <div>
+            <strong>发现需要统一的资源</strong>
+            <p>
+              待迁移 {props.preview.migrate.length} 项，重复副本 {props.preview.duplicates.length} 项，
+              内容冲突 {props.preview.conflicts.length} 项。执行前会生成可恢复备份。
+            </p>
+          </div>
+          <button className="primary-action compact" disabled={props.busy || props.preview.conflicts.some((item) => !conflictChoices[item.id])} onClick={() => props.onApplyMigration(conflictResolutions)} type="button">
+            预览确认并统一
+          </button>
+          {props.preview.conflicts.length > 0 && (
+            <div className="resource-conflicts">
+              {props.preview.conflicts.map((conflict) => (
+                <label key={conflict.id}>
+                  <span>{conflict.kind === 'skill' ? 'Skill' : '插件'} · {conflict.name}</span>
+                  <select aria-label={`选择 ${conflict.name} 保留版本`} onChange={(event) => setConflictChoices((current) => ({ ...current, [conflict.id]: event.target.value }))} value={conflictChoices[conflict.id] || ''}>
+                    <option value="">请选择保留来源</option>
+                    {conflict.candidates.map((candidate) => (
+                      <option key={candidate.id} value={candidate.id}>{candidate.scope} · {candidate.contentHash.slice(0, 8)}</option>
+                    ))}
+                  </select>
+                </label>
+              ))}
+            </div>
+          )}
+          {props.preview.skipped.length > 0 && <small>另有 {props.preview.skipped.length} 项因安全检查被跳过。</small>}
+        </section>
+      )}
 
       {activeResourceView === 'prompt' ? (
         <div className="resource-view" role="tabpanel">
@@ -1581,7 +1733,7 @@ function ResourcesPanel(props: {
                     <article className="skill-list-row" key={skill.path}>
                       <div className="skill-identity">
                         <strong>{skill.name}</strong>
-                        <span className={`skill-source ${skill.shared ? 'shared' : 'legacy'}`}>{skill.source}</span>
+                        <span className={`skill-source ${skill.shared ? 'shared' : skill.source === 'Codex 管理' ? 'system' : 'legacy'}`}>{skill.source}</span>
                         <span className="resource-version">{skill.version ? `v${skill.version}` : '版本未声明'}</span>
                       </div>
                       <div className="skill-detail">
@@ -1668,6 +1820,32 @@ function ResourcesPanel(props: {
                 <h2>还没有共享插件</h2>
                 <p>点击“汇总现有插件”，从所有 Profile 收集第三方插件。</p>
               </div>
+            )}
+            {observedPlugins.length > 0 && (
+              <section className="skill-group resource-observed-group">
+                <header className="skill-group-heading">
+                  <div><h3>Codex 管理与运行缓存</h3><p>统一展示，不作为可编辑资源重复计数</p></div>
+                  <span>{observedPlugins.length}</span>
+                </header>
+                <div className="observed-resource-list">
+                  {observedPlugins.map((item) => (
+                    <div key={`${item.name}@${item.version || ''}:${item.runtimeCache}`}><strong>{item.name}</strong><span>{item.runtimeCache ? `运行缓存 · ${item.locationCount} 个 Profile` : `Codex 官方 · ${item.locationCount} 处`}</span><code>{item.path}</code></div>
+                  ))}
+                </div>
+              </section>
+            )}
+            {(props.plugins?.locations || []).some((item) => !item.canonical && !item.codexManaged && !item.runtimeCache) && (
+              <section className="skill-group resource-observed-group">
+                <header className="skill-group-heading">
+                  <div><h3>待统一来源</h3><p>来自默认 Home 或托管 Profile，确认迁移后会清理旧副本</p></div>
+                  <span>{(props.plugins?.locations || []).filter((item) => !item.canonical && !item.codexManaged && !item.runtimeCache).length}</span>
+                </header>
+                <div className="observed-resource-list">
+                  {(props.plugins?.locations || []).filter((item) => !item.canonical && !item.codexManaged && !item.runtimeCache).map((item) => (
+                    <div key={item.id}><strong>{item.name}</strong><span>{item.scope}</span><code>{item.path}</code></div>
+                  ))}
+                </div>
+              </section>
             )}
           </div>
         </div>
